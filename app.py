@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,7 @@ st.set_page_config(page_title="SAC | Fechamento mensal", page_icon="🎧", layou
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("ZENDESK_DATA_DIR", BASE_DIR))
+MANUAL_CONFIG_PATH = DATA_DIR / "config_manual.json"
 EXPECTED_FILES = {
     "tickets": "Zendesk-Support_Tickets_",
     "efficiency": "Zendesk-Support_Efficiency_",
@@ -335,6 +337,10 @@ def load_dashboard(source_signature: tuple) -> dict:
         "weekly_backlog_status": category_dates(backlog, "Weekly historical backlog... 2"),
         "weekly_backlog_group": category_dates(backlog, "Weekly historical backlog... 1"),
         "csat_channel": category_metrics(satisfaction, "Satisfaction score by sel"),
+        "csat_breakdown": pd.DataFrame(
+            one_row_series(satisfaction, "Good vs bad satisfaction"),
+            columns=["Categoria", "Tickets"],
+        ),
         "csat_daily": dated_metrics(satisfaction, "Satisfaction score and ra... 1"),
         "csat_monthly": period_metrics(satisfaction, "Satisfaction score and ra... 2"),
         "sla_daily": dated_metrics(sla, "Achieved vs breached comp"),
@@ -370,36 +376,144 @@ def section_title(title: str, caption: str | None = None) -> None:
         st.caption(caption)
 
 
+def load_manual_config() -> dict:
+    defaults = {
+        "mes_referencia": "Julho de 2026",
+        "meta_resolucao_h": 55.0,
+        "meta_resposta_h": 28.0,
+        "reclame_aqui": {
+            "nota": 8.5,
+            "reclamacoes": 14,
+            "respondidas_pct": 100.0,
+            "voltariam_pct": 77.8,
+            "solucao_pct": 91.1,
+            "nota_consumidor": 7.22,
+            "tempo_resposta": "8 dias e 21 horas",
+            "motivos": {
+                "Problemas de qualidade": 7,
+                "Questões logísticas": 6,
+                "Experiência de compra e atendimento": 1,
+            },
+        },
+    }
+    if not MANUAL_CONFIG_PATH.exists():
+        return defaults
+    try:
+        saved = json.loads(MANUAL_CONFIG_PATH.read_text(encoding="utf-8"))
+        return defaults | saved | {"reclame_aqui": defaults["reclame_aqui"] | saved.get("reclame_aqui", {})}
+    except Exception:
+        return defaults
+
+
+def hours_from_detail(detail: dict | None, column: str, fallback: float) -> float:
+    if not detail or detail["solved"].empty or column not in detail["solved"]:
+        return fallback
+    value = detail["solved"][column].median()
+    return fallback if pd.isna(value) else float(value) / 60
+
+
+def target_gauge(title: str, actual: float, target: float) -> go.Figure:
+    within_target = actual <= target
+    upper = max(target * 1.45, actual * 1.2, 1)
+    figure = go.Figure(go.Indicator(
+        mode="number+delta+gauge",
+        value=actual,
+        number={"suffix": " h", "font": {"size": 34, "color": COLORS["navy"]}},
+        delta={
+            "reference": target,
+            "relative": False,
+            "valueformat": ".1f",
+            "increasing": {"color": COLORS["red"]},
+            "decreasing": {"color": COLORS["green"]},
+            "suffix": " h",
+        },
+        title={"text": f"<b>{title}</b><br><span style='font-size:13px;color:#667085'>Meta: até {target:.1f} h</span>"},
+        gauge={
+            "shape": "bullet",
+            "axis": {"range": [0, upper], "tickfont": {"size": 10}},
+            "bar": {"color": COLORS["green"] if within_target else COLORS["red"]},
+            "bgcolor": "#EDF1F5",
+            "borderwidth": 0,
+            "threshold": {"line": {"color": COLORS["navy"], "width": 3}, "value": target},
+        },
+    ))
+    figure.update_layout(height=190, margin=dict(l=35, r=35, t=55, b=25), paper_bgcolor="white")
+    return figure
+
+
 st.markdown(
     """
     <style>
-      .stApp { background: #F7F8FA; }
-      [data-testid="stMetric"] { background: white; border: 1px solid #E7EAF0; border-radius: 16px; padding: 16px; }
-      [data-testid="stMetricLabel"] { color: #667085; }
-      [data-testid="stMetricValue"] { color: #183B56; }
-      div[data-testid="stTabs"] button { font-weight: 700; }
-      .block-container { padding-top: 2rem; padding-bottom: 4rem; }
+      :root { --navy:#163B5C; --blue:#4F8FCF; --ice:#F4F7FA; --line:#E4EAF0; }
+      .stApp { background: #F4F7FA; }
+      .block-container { padding-top: 1.7rem; padding-bottom: 4rem; max-width: 1440px; }
+      [data-testid="stSidebar"] { background: #FFFFFF; border-right: 1px solid #E4EAF0; }
+      [data-testid="stMetric"] {
+        background: white; border: 1px solid #E4EAF0; border-radius: 18px;
+        padding: 18px 18px 16px; box-shadow: 0 8px 24px rgba(22,59,92,.05);
+      }
+      [data-testid="stMetricLabel"] { color: #667085; font-weight: 600; }
+      [data-testid="stMetricValue"] { color: #163B5C; }
+      div[data-testid="stTabs"] [role="tablist"] { gap: 10px; }
+      div[data-testid="stTabs"] button {
+        font-weight: 700; background: white; border-radius: 12px 12px 0 0; padding: 12px 18px;
+      }
+      .hero {
+        padding: 22px 26px; border-radius: 22px; color: white; margin-bottom: 18px;
+        background: linear-gradient(120deg,#143A5A 0%,#205D8F 60%,#5A9DD6 100%);
+        box-shadow: 0 12px 30px rgba(20,58,90,.16);
+      }
+      .hero h1 { margin:0; font-size:31px; line-height:1.15; }
+      .hero p { margin:8px 0 0; opacity:.86; font-size:15px; }
+      .panel-title { font-size:20px; font-weight:750; color:#163B5C; margin:6px 0 2px; }
+      .panel-caption { color:#667085; font-size:13px; margin-bottom:10px; }
+      .manual-card {
+        background:white; border:1px solid #E4EAF0; border-radius:18px; padding:20px 22px;
+        box-shadow:0 8px 24px rgba(22,59,92,.05); margin-bottom:12px;
+      }
+      .score { font-size:44px; font-weight:800; color:#2A9D8F; line-height:1; }
+      .muted { color:#667085; font-size:13px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("🎧 Central de gestão do SAC")
-st.caption("Fechamento mensal do Zendesk • volume, velocidade, equipe, backlog, SLA e voz do cliente")
-
 repository_sources = discover_repository_sources()
+manual_defaults = load_manual_config()
 with st.sidebar:
-    st.header("Base de dados")
-    st.caption("O painel lê automaticamente as oito planilhas na pasta do app. Você também pode testá-lo enviando os arquivos aqui.")
-    uploads = st.file_uploader("Carregar exportações do Zendesk", type=["xlsx", "zip"], accept_multiple_files=True)
+    st.markdown("### Fechamento do SAC")
+    st.caption("Ajuste aqui somente as metas e os dados manuais do Reclame Aqui.")
+    reference_month = st.text_input("Mês de referência", manual_defaults["mes_referencia"])
+    target_reply = st.number_input("Meta • tempo de resposta (h)", min_value=0.1, value=float(manual_defaults["meta_resposta_h"]), step=0.5)
+    target_resolution = st.number_input("Meta • tempo de resolução (h)", min_value=0.1, value=float(manual_defaults["meta_resolucao_h"]), step=0.5)
+
+    ra_default = manual_defaults["reclame_aqui"]
+    with st.expander("Reclame Aqui • preenchimento manual", expanded=True):
+        ra_score = st.number_input("Nota geral", min_value=0.0, max_value=10.0, value=float(ra_default["nota"]), step=0.1)
+        ra_complaints = st.number_input("Reclamações", min_value=0, value=int(ra_default["reclamacoes"]), step=1)
+        ra_answered = st.number_input("Respondidas (%)", min_value=0.0, max_value=100.0, value=float(ra_default["respondidas_pct"]), step=0.1)
+        ra_return = st.number_input("Voltariam a fazer negócio (%)", min_value=0.0, max_value=100.0, value=float(ra_default["voltariam_pct"]), step=0.1)
+        ra_solution = st.number_input("Índice de solução (%)", min_value=0.0, max_value=100.0, value=float(ra_default["solucao_pct"]), step=0.1)
+        ra_consumer = st.number_input("Nota do consumidor", min_value=0.0, max_value=10.0, value=float(ra_default["nota_consumidor"]), step=0.1)
+        ra_response_time = st.text_input("Tempo médio de resposta", str(ra_default["tempo_resposta"]))
+        st.caption("Reclamações por motivo")
+        ra_quality = st.number_input("Problemas de qualidade", min_value=0, value=int(ra_default["motivos"].get("Problemas de qualidade", 0)), step=1)
+        ra_logistics = st.number_input("Questões logísticas", min_value=0, value=int(ra_default["motivos"].get("Questões logísticas", 0)), step=1)
+        ra_experience = st.number_input("Compra e atendimento", min_value=0, value=int(ra_default["motivos"].get("Experiência de compra e atendimento", 0)), step=1)
+
+    with st.expander("Fontes de dados"):
+        uploads = st.file_uploader("Substituir arquivos nesta sessão", type=["xlsx", "zip"], accept_multiple_files=True)
+        st.caption("No uso normal, o painel lê automaticamente os arquivos publicados no GitHub.")
     sources = repository_sources | uploaded_sources(uploads or [])
     required_found = sum(key in sources for key in EXPECTED_FILES)
-    st.progress(required_found / len(EXPECTED_FILES), text=f"{required_found} de {len(EXPECTED_FILES)} relatórios encontrados")
-    for key, prefix in EXPECTED_FILES.items():
-        st.write(("✅ " if key in sources else "⬜ ") + prefix.rstrip("_"))
-    st.write(("✅ " if "detail" in sources else "➕ ") + "Base detalhada CSV.ZIP (recomendada)")
-    if "detail" not in sources:
-        st.caption("Sem a ZIP, o fechamento funciona, mas não mostra motivos nem drill-down por ticket.")
+    if required_found == len(EXPECTED_FILES):
+        st.success("Relatórios Zendesk carregados")
+    else:
+        st.warning(f"{required_found} de {len(EXPECTED_FILES)} relatórios encontrados")
+    if "detail" in sources:
+        st.success("Base detalhada ZIP carregada")
+    else:
+        st.info("Adicione `export-*.csv.zip` ao GitHub para completar a visão executiva.")
 
 missing = [prefix for key, prefix in EXPECTED_FILES.items() if key not in sources]
 if missing:
@@ -418,47 +532,94 @@ except Exception as error:
 kpi = data["kpis"]
 period_start = data["daily_volume"]["Data"].min()
 period_end = data["daily_volume"]["Data"].max()
-if pd.notna(period_start) and pd.notna(period_end):
-    st.caption(f"Período principal: {period_start:%d/%m/%Y} a {period_end:%d/%m/%Y}")
+detail = data["detail"]
+detail_created = detail["created"] if detail else pd.DataFrame()
+detail_solved = detail["solved"] if detail else pd.DataFrame()
+created_total = len(detail_created) if detail else int(kpi["created"])
+solved_total = len(detail_solved) if detail else int(kpi["solved"])
+reply_actual = hours_from_detail(detail, "First reply time in minutes", kpi["first_reply_min"] / 60)
+resolution_actual = hours_from_detail(detail, "Full resolution time in minutes", kpi["resolution_h"])
+
+st.markdown(
+    f"""
+    <div class="hero">
+      <h1>Fechamento do SAC • {reference_month}</h1>
+      <p>Visão executiva de atendimento, eficiência e voz do cliente</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 tabs = st.tabs(["Visão executiva", "Demanda", "Eficiência", "Equipe", "Backlog", "Satisfação & SLA", "Qualidade dos dados"])
 
 with tabs[0]:
     columns = st.columns(6)
-    columns[0].metric("Tickets criados", f"{kpi['created']:,.0f}")
-    columns[1].metric("Tickets resolvidos", f"{kpi['solved']:,.0f}", f"{kpi['solved'] - kpi['created']:+,.0f} vs. entrada")
-    columns[2].metric("1ª resposta mediana", format_minutes(kpi["first_reply_min"]))
-    columns[3].metric("Resolução mediana", format_hours(kpi["resolution_h"]))
+    columns[0].metric("Tickets criados", f"{created_total:,.0f}", "base detalhada" if detail else "relatório agregado")
+    columns[1].metric("Tickets resolvidos", f"{solved_total:,.0f}")
+    columns[2].metric("Resposta mediana", f"{reply_actual:.1f} h", f"meta {target_reply:.1f} h", delta_color="inverse")
+    columns[3].metric("Resolução mediana", f"{resolution_actual:.1f} h", f"meta {target_resolution:.1f} h", delta_color="inverse")
     columns[4].metric("CSAT", pct(kpi["csat"]), f"{kpi['rated']:.0f} avaliações")
-    columns[5].metric("Backlog atual", f"{kpi['unsolved']:,.0f}", f"{kpi['unreplied']:.0f} sem resposta")
+    columns[5].metric("Backlog", f"{kpi['unsolved']:,.0f}", f"{kpi['unreplied']:.0f} sem resposta")
 
-    left, right = st.columns([1.65, 1])
-    with left:
-        section_title("Ritmo diário", "Entradas e resoluções no período selecionado no Zendesk.")
-        fig = px.line(data["daily_volume"], x="Data", y="Valor", color="Métrica", markers=True,
-                      color_discrete_map={"Criados": COLORS["coral"], "Resolvidos": COLORS["navy"]})
-        fig.update_layout(yaxis_title="Tickets", legend_title="", hovermode="x unified")
-        st.plotly_chart(fig, width="stretch")
-    with right:
-        section_title("Backlog por status", "Foto atual do relatório de tickets não resolvidos.")
-        status = data["backlog_status"]
-        fig = px.bar(status, x="Categoria", y="Valor", color="Categoria",
-                     color_discrete_sequence=[COLORS["blue"], COLORS["coral"], COLORS["gold"]], text_auto=True)
-        fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="Tickets")
-        st.plotly_chart(fig, width="stretch")
+    st.markdown('<div class="panel-title">Meta x realizado</div><div class="panel-caption">Quanto menor o tempo, melhor o resultado.</div>', unsafe_allow_html=True)
+    gauge_left, gauge_right = st.columns(2)
+    with gauge_left:
+        st.plotly_chart(target_gauge("Tempo de resposta", reply_actual, target_reply), width="stretch", config={"displayModeBar": False})
+    with gauge_right:
+        st.plotly_chart(target_gauge("Tempo de resolução", resolution_actual, target_resolution), width="stretch", config={"displayModeBar": False})
 
-    st.markdown("#### Leitura gerencial")
-    daily_created = data["daily_volume"].query("Métrica == 'Criados'")
-    peak = daily_created.loc[daily_created["Valor"].idxmax()] if not daily_created.empty else None
-    pending = status.loc[status["Categoria"].eq("Pendente"), "Valor"].sum()
-    insights = [
-        f"A equipe resolveu **{kpi['solved'] - kpi['created']:.0f} tickets a mais** do que recebeu no mês.",
-        f"O pico de entrada foi **{peak['Valor']:.0f} tickets em {peak['Data']:%d/%m}**." if peak is not None else "Sem série diária disponível.",
-        f"**{pending:.0f} tickets** do backlog atual estão pendentes, equivalentes a {pending / kpi['unsolved']:.0%} da fila." if kpi["unsolved"] else "Backlog zerado.",
-        f"O CSAT está em **{pct(kpi['csat'])}**, mas somente **{kpi['rated']:.0f} tickets** foram avaliados.",
-    ]
-    for insight in insights:
-        st.markdown(f"- {insight}")
+    performance = pd.DataFrame([
+        {"Indicador": "Tempo de resposta", "Objetivo (h)": target_reply, "Realizado (h)": reply_actual},
+        {"Indicador": "Tempo de resolução", "Objetivo (h)": target_resolution, "Realizado (h)": resolution_actual},
+    ])
+    performance["Δ realizado x objetivo (h)"] = performance["Realizado (h)"] - performance["Objetivo (h)"]
+    performance["Variação sobre a meta"] = performance["Δ realizado x objetivo (h)"] / performance["Objetivo (h)"]
+    performance["Status"] = np.where(performance["Realizado (h)"] <= performance["Objetivo (h)"], "Dentro da meta", "Acima da meta")
+    with st.expander("Ver tabela de meta x realizado"):
+        st.dataframe(performance, hide_index=True, width="stretch", column_config={"Variação sobre a meta": st.column_config.NumberColumn(format="%.1f%%")})
+
+    ra_column, csat_column = st.columns(2, gap="large")
+    with ra_column:
+        st.markdown('<div class="panel-title">♥ Reclame Aqui</div><div class="panel-caption">Indicadores preenchidos manualmente para o fechamento.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="manual-card"><div class="score">{ra_score:.1f}</div><div class="muted">Nota geral • {ra_complaints} reclamações • {ra_answered:.1f}% respondidas</div></div>', unsafe_allow_html=True)
+        ra_metrics = st.columns(3)
+        ra_metrics[0].metric("Voltariam", f"{ra_return:.1f}%")
+        ra_metrics[1].metric("Índice de solução", f"{ra_solution:.1f}%")
+        ra_metrics[2].metric("Nota consumidor", f"{ra_consumer:.2f}")
+        st.caption(f"Tempo médio de resposta: {ra_response_time}")
+        ra_reasons = pd.DataFrame({
+            "Motivo": ["Problemas de qualidade", "Questões logísticas", "Compra e atendimento"],
+            "Reclamações": [ra_quality, ra_logistics, ra_experience],
+        }).sort_values("Reclamações")
+        ra_fig = px.bar(ra_reasons, x="Reclamações", y="Motivo", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
+        ra_fig.update_layout(height=260, margin=dict(l=0, r=15, t=10, b=25), xaxis_title="", yaxis_title="", paper_bgcolor="white", plot_bgcolor="white")
+        st.plotly_chart(ra_fig, width="stretch", config={"displayModeBar": False})
+
+    with csat_column:
+        st.markdown('<div class="panel-title">Resultados CSAT</div><div class="panel-caption">Satisfação e participação na pesquisa.</div>', unsafe_allow_html=True)
+        csat_breakdown = data["csat_breakdown"].copy()
+        csat_breakdown["Categoria"] = csat_breakdown["Categoria"].replace({
+            "Good w/ comment": "Boa com comentário", "Good w/o comment": "Boa sem comentário",
+            "Bad w/ comment": "Ruim com comentário", "Bad w/o comment": "Ruim sem comentário",
+        })
+        positive = int(csat_breakdown.loc[csat_breakdown["Categoria"].str.startswith("Boa"), "Tickets"].sum())
+        negative = int(csat_breakdown.loc[csat_breakdown["Categoria"].str.startswith("Ruim"), "Tickets"].sum())
+        st.markdown(f"- Índice de satisfação: **{pct(kpi['csat'])}**")
+        st.markdown(f"- Taxa de resposta: **{pct(kpi['survey_rate'])}**")
+        st.markdown(f"- **:green[{positive} positivas]** e **:red[{negative} negativas]**")
+        csat_fig = px.pie(
+            csat_breakdown, values="Tickets", names="Categoria", hole=.63,
+            color="Categoria", color_discrete_map={
+                "Boa com comentário": "#11875D", "Boa sem comentário": "#39A87E",
+                "Ruim com comentário": "#C93445", "Ruim sem comentário": "#ED5968",
+            },
+        )
+        csat_fig.update_traces(textposition="outside", textinfo="value+percent")
+        csat_fig.update_layout(height=390, margin=dict(l=10, r=10, t=10, b=10), legend_title="", paper_bgcolor="white")
+        st.plotly_chart(csat_fig, width="stretch", config={"displayModeBar": False})
+
+    if detail:
+        st.caption(f"Base detalhada: {detail['filename']} • {detail['all_rows']:,} tickets no arquivo • período filtrado conforme o fechamento dos relatórios.")
 
 with tabs[1]:
     left, right = st.columns([1.2, 1])
