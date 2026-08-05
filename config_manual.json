@@ -1,0 +1,19 @@
+{
+  "mes_referencia": "Julho de 2026",
+  "meta_resolucao_h": 55.0,
+  "meta_resposta_h": 28.0,
+  "reclame_aqui": {
+    "nota": 8.5,
+    "reclamacoes": 14,
+    "respondidas_pct": 100.0,
+    "voltariam_pct": 77.8,
+    "solucao_pct": 91.1,
+    "nota_consumidor": 7.22,
+    "tempo_resposta": "8 dias e 21 horas",
+    "motivos": {
+      "Problemas de qualidade": 7,
+      "Questões logísticas": 6,
+      "Experiência de compra e atendimento": 1
+    }
+  }
+}
