@@ -32,8 +32,8 @@ META_TEMPO_RESPOSTA_H = 28.0
 META_TEMPO_RESOLUCAO_H = 55.0
 
 # Reclame Aqui
-RA_NOTA = 8.7
-RA_NOTA_MES_ANTERIOR = 8.5
+RA_NOTA = 8.5
+RA_NOTA_MES_ANTERIOR = 8.3
 RA_RECLAMACOES = 14
 RA_RECLAMACOES_MES_ANTERIOR = 7
 RA_RESPONDIDAS_PCT = 100.0
@@ -154,13 +154,13 @@ def metric_card(label: str, value: str, detail: str, tone: str = "blue") -> str:
     safe_label = html.escape(label)
     safe_value = html.escape(value)
     safe_detail = html.escape(detail)
-    return f"""
-      <div class="metric-card metric-{tone}">
-        <div class="metric-label">{safe_label}</div>
-        <div class="metric-value">{safe_value}</div>
-        <div class="metric-detail">{safe_detail}</div>
-      </div>
-    """
+    return (
+        f'<div class="metric-card metric-{tone}">'
+        f'<div class="metric-label">{safe_label}</div>'
+        f'<div class="metric-value">{safe_value}</div>'
+        f'<div class="metric-detail">{safe_detail}</div>'
+        '</div>'
+    )
 
 
 def performance_row(label: str, target: float, actual: float) -> str:
@@ -170,16 +170,16 @@ def performance_row(label: str, target: float, actual: float) -> str:
     status_class = "good" if achieved else "bad"
     status_text = "Dentro da meta" if achieved else "Acima da meta"
     sign = "+" if delta > 0 else ""
-    return f"""
-      <div class="performance-row">
-        <div class="performance-name">{html.escape(label)}</div>
-        <div><span class="cell-label">Objetivo</span><strong>{format_decimal(target)} h</strong></div>
-        <div><span class="cell-label">Realizado</span><strong>{format_decimal(actual)} h</strong></div>
-        <div><span class="cell-label">Diferença</span><strong>{sign}{format_decimal(delta)} h</strong></div>
-        <div><span class="cell-label">Variação</span><strong>{sign}{format_percent(variation)}</strong></div>
-        <div><span class="status-pill {status_class}">{status_text}</span></div>
-      </div>
-    """
+    return (
+        '<div class="performance-row">'
+        f'<div class="performance-name">{html.escape(label)}</div>'
+        f'<div><span class="cell-label">Objetivo</span><strong>{format_decimal(target)} h</strong></div>'
+        f'<div><span class="cell-label">Realizado</span><strong>{format_decimal(actual)} h</strong></div>'
+        f'<div><span class="cell-label">Diferença</span><strong>{sign}{format_decimal(delta)} h</strong></div>'
+        f'<div><span class="cell-label">Variação</span><strong>{sign}{format_percent(variation)}</strong></div>'
+        f'<div><span class="status-pill {status_class}">{status_text}</span></div>'
+        '</div>'
+    )
 
 
 def source_from_repository_or_upload() -> tuple[str | bytes | None, str, float | int]:
