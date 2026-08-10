@@ -28,35 +28,35 @@ BASE_DIR = Path(__file__).resolve().parent
 ANO_REFERENCIA = 2026
 MES_REFERENCIA = 7
 NOME_MES_REFERENCIA = "Julho de 2026"
-
+ 
 # Metas do SAC em horas. Quanto menor o resultado, melhor.
 META_TEMPO_RESPOSTA_H = 28.0
 META_TEMPO_RESOLUCAO_H = 55.0
-
+ 
 # Reclame Aqui
-RA_NOTA = 8.5
+RA_NOTA = 8.8
 RA_NOTA_MES_ANTERIOR = 8.3
-RA_RECLAMACOES = 14
+RA_RECLAMACOES = 19
 RA_RECLAMACOES_MES_ANTERIOR = 7
 RA_RESPONDIDAS_PCT = 100.0
-RA_VOLTARIAM_PCT = 77.8
-RA_INDICE_SOLUCAO_PCT = 91.1
-RA_NOTA_CONSUMIDOR = 7.22
-RA_TEMPO_MEDIO_RESPOSTA = "8 dias e 21 horas"
-
+RA_VOLTARIAM_PCT = 80.8
+RA_INDICE_SOLUCAO_PCT = 94.2
+RA_NOTA_CONSUMIDOR = 7.77
+RA_TEMPO_MEDIO_RESPOSTA = "8 dias e 12 horas"
+ 
 # Categorias das reclamações no Reclame Aqui.
 RA_CATEGORIAS_RECLAMACOES = {
-    "Problemas de qualidade": 7,
-    "Questões logísticas": 6,
-    "Experiência de compra e atendimento": 1,
+    "Problemas de qualidade": 11,
+    "Questões logísticas": 4,
+    "Experiência de compra e atendimento": 4,
 }
-
+ 
 # Categorias das avaliações no Reclame Aqui. Preencha as quantidades manualmente.
 # Se todas estiverem zeradas, o dashboard mostrará um aviso no lugar do gráfico.
 RA_CATEGORIAS_AVALIACOES = {
-    "Positivas": 0,
-    "Neutras": 0,
-    "Negativas": 0,
+    "Positivas": 7,
+    "Neutras": 2,
+    "Negativas": 2,
 }
 
 # =============================================================================
