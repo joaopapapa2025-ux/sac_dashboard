@@ -242,6 +242,8 @@ st.markdown(
       :root {
         --navy: #173B5E;
         --blue: #4F91CF;
+        --teal: #16886A;
+        --red: #C83C4D;
         --text: #172B3A;
         --muted: #667085;
         --line: #E3E9EF;
@@ -336,8 +338,35 @@ st.markdown(
       .insight { color: var(--text); font-size: 14px; padding: 7px 0; }
       .source-note { color: var(--muted); font-size: 11px; text-align: right; margin-top: 16px; }
 
+      .filter-period {
+        background: white; border: 1px solid var(--line); border-radius: 12px;
+        padding: 11px 13px; color: var(--navy); font-size: 14px; font-weight: 720;
+        margin: -3px 0 17px;
+      }
+      .filter-period span { display: block; color: var(--muted); font-size: 10px; font-weight: 500; margin-top: 2px; }
+
+      .agent-grid {
+        display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px; margin-bottom: 30px;
+      }
+      .agent-card {
+        min-width: 0; background: white; border: 1px solid var(--line); border-radius: 18px;
+        padding: 18px; box-shadow: 0 8px 26px rgba(23, 59, 94, .05);
+      }
+      .agent-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 16px; }
+      .agent-name { color: var(--navy); font-size: 17px; font-weight: 780; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .agent-volume { color: var(--blue); font-size: 25px; line-height: 1; font-weight: 800; letter-spacing: -.03em; }
+      .agent-volume-label { color: var(--muted); font-size: 9px; text-align: right; margin-top: 3px; }
+      .agent-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+      .agent-stat { background: #F7F9FB; border-radius: 11px; padding: 10px 8px; min-width: 0; }
+      .agent-stat strong { display: block; color: var(--navy); font-size: 15px; white-space: nowrap; }
+      .agent-stat span { display: block; color: var(--muted); font-size: 9px; line-height: 1.25; margin-top: 3px; }
+      .agent-csat-good strong { color: var(--teal); }
+      .agent-csat-low strong { color: var(--red); }
+
       @media (max-width: 900px) {
         .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .performance-row { grid-template-columns: 1fr 1fr; gap: 12px; }
         .performance-name, .performance-row > div:last-child { grid-column: 1 / -1; }
       }
@@ -345,6 +374,7 @@ st.markdown(
         .block-container { padding-left: .8rem; padding-right: .8rem; }
         .hero { padding: 23px 20px; border-radius: 18px; }
         .metric-grid { grid-template-columns: 1fr; }
+        .agent-grid { grid-template-columns: 1fr; }
         .mini-grid { grid-template-columns: 1fr; }
       }
     </style>
@@ -371,17 +401,35 @@ if solved_all.empty:
     st.stop()
 
 solved_all["Assignee"] = solved_all["Assignee"].fillna("Não atribuído").replace("", "Não atribuído")
-available_months = sorted(solved_all["Solved at"].dropna().dt.to_period("M").unique(), reverse=True)
+month_counts = solved_all["Solved at"].dropna().dt.to_period("M").value_counts()
+# Descarta meses residuais de tickets históricos. Mantém meses com ao menos 5%
+# do volume do principal mês (e no mínimo 5 tickets).
+relevant_month_minimum = max(5, int(month_counts.max() * .05))
+relevant_month_counts = month_counts[month_counts.ge(relevant_month_minimum)]
+available_months = sorted(relevant_month_counts.index.tolist(), reverse=True)
 default_period = pd.Period(year=ANO_REFERENCIA, month=MES_REFERENCIA, freq="M")
+if default_period in month_counts.index and default_period not in available_months:
+    available_months.append(default_period)
+    available_months.sort(reverse=True)
 default_index = available_months.index(default_period) if default_period in available_months else 0
 
 st.sidebar.header("Filtros")
-selected_period = st.sidebar.selectbox(
-    "Mês de resolução",
-    available_months,
-    index=default_index,
-    format_func=lambda value: value.strftime("%m/%Y"),
-)
+if len(available_months) == 1:
+    selected_period = available_months[0]
+    period_ticket_count = int(month_counts.get(selected_period, 0))
+    st.sidebar.markdown(
+        f'<div style="font-size:14px;margin-bottom:7px">Mês de resolução</div>'
+        f'<div class="filter-period">{selected_period.strftime("%m/%Y")}'
+        f'<span>{format_number(period_ticket_count)} tickets resolvidos</span></div>',
+        unsafe_allow_html=True,
+    )
+else:
+    selected_period = st.sidebar.selectbox(
+        "Mês de resolução",
+        available_months,
+        index=default_index,
+        format_func=lambda value: f'{value.strftime("%m/%Y")} · {format_number(int(month_counts.get(value, 0)))} resolvidos',
+    )
 month_start = selected_period.start_time
 month_end = selected_period.end_time
 month_solved = solved_all[
@@ -448,8 +496,8 @@ resolution_status = "Dentro da meta" if resolution_hours <= META_TEMPO_RESOLUCAO
 st.markdown(
     '<div class="hero">'
     '<div class="hero-eyebrow">GESTÃO DE ATENDIMENTO</div>'
-    f'<h1>Fechamento do SAC • {html.escape(period_name)}</h1>'
-    '<p>Indicadores calculados somente sobre tickets resolvidos, em horas corridas.</p>'
+    f'<h1>Dashboard SAC • {html.escape(period_name)}</h1>'
+    '<p>Visão executiva da operação, experiência do cliente e desempenho do time.</p>'
     f'<p style="margin-top:10px;font-size:12px;opacity:.72">Base atualizada no GitHub em {html.escape(updated_text)}</p>'
     '</div>',
     unsafe_allow_html=True,
@@ -499,18 +547,26 @@ for agent_name, agent_data in solved.groupby("Assignee"):
         "CSAT": agent_good / agent_rated if agent_rated else float("nan"),
     })
 agent_summary = pd.DataFrame(agent_rows).sort_values("Tickets resolvidos", ascending=False)
-agent_chart_col, agent_table_col = st.columns([.9, 1.35], gap="large")
-with agent_chart_col:
-    agent_figure = px.bar(agent_summary.sort_values("Tickets resolvidos"), x="Tickets resolvidos", y="Agente", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
-    agent_figure.update_traces(textposition="outside", cliponaxis=False)
-    agent_figure.update_layout(height=max(280, 65 * len(agent_summary)), margin=dict(l=10, r=45, t=15, b=30), xaxis_title="Tickets resolvidos", yaxis_title="", paper_bgcolor="white", plot_bgcolor="white")
-    st.plotly_chart(agent_figure, width="stretch", config={"displayModeBar": False})
-with agent_table_col:
-    agent_display = agent_summary.copy()
-    agent_display["Resposta mediana (h)"] = agent_display["Resposta mediana (h)"].map(lambda x: format_decimal(x))
-    agent_display["Resolução mediana (h)"] = agent_display["Resolução mediana (h)"].map(lambda x: format_decimal(x))
-    agent_display["CSAT"] = agent_display["CSAT"].map(format_percent)
-    st.dataframe(agent_display, hide_index=True, width="stretch", height=max(280, 65 * len(agent_summary)))
+agent_cards = []
+for _, agent in agent_summary.iterrows():
+    agent_csat = agent["CSAT"]
+    csat_class = "agent-csat-good" if pd.notna(agent_csat) and agent_csat >= .75 else "agent-csat-low"
+    csat_text = format_percent(agent_csat) if pd.notna(agent_csat) else "—"
+    agent_cards.append(
+        '<div class="agent-card">'
+        '<div class="agent-head">'
+        f'<div class="agent-name">{html.escape(str(agent["Agente"]))}</div>'
+        '<div>'
+        f'<div class="agent-volume">{format_number(agent["Tickets resolvidos"])}</div>'
+        '<div class="agent-volume-label">resolvidos</div>'
+        '</div></div>'
+        '<div class="agent-stats">'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resposta mediana (h)"])} h</strong><span>Resposta mediana</span></div>'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resolução mediana (h)"])} h</strong><span>Resolução mediana</span></div>'
+        f'<div class="agent-stat {csat_class}"><strong>{csat_text}</strong><span>CSAT · {format_number(agent["Avaliações"])} avaliações</span></div>'
+        '</div></div>'
+    )
+st.markdown(f'<div class="agent-grid">{"".join(agent_cards)}</div>', unsafe_allow_html=True)
 
 ra_column, csat_column = st.columns(2, gap="large")
 with ra_column:
