@@ -28,11 +28,11 @@ BASE_DIR = Path(__file__).resolve().parent
 ANO_REFERENCIA = 2026
 MES_REFERENCIA = 7
 NOME_MES_REFERENCIA = "Julho de 2026"
- 
+
 # Metas do SAC em horas. Quanto menor o resultado, melhor.
 META_TEMPO_RESPOSTA_H = 28.0
 META_TEMPO_RESOLUCAO_H = 55.0
- 
+
 # Reclame Aqui
 RA_NOTA = 8.8
 RA_NOTA_MES_ANTERIOR = 8.3
@@ -43,14 +43,14 @@ RA_VOLTARIAM_PCT = 80.8
 RA_INDICE_SOLUCAO_PCT = 94.2
 RA_NOTA_CONSUMIDOR = 7.77
 RA_TEMPO_MEDIO_RESPOSTA = "8 dias e 12 horas"
- 
+
 # Categorias das reclamações no Reclame Aqui.
 RA_CATEGORIAS_RECLAMACOES = {
     "Problemas de qualidade": 11,
     "Questões logísticas": 4,
     "Experiência de compra e atendimento": 4,
 }
- 
+
 # Categorias das avaliações no Reclame Aqui. Preencha as quantidades manualmente.
 # Se todas estiverem zeradas, o dashboard mostrará um aviso no lugar do gráfico.
 RA_CATEGORIAS_AVALIACOES = {
@@ -193,6 +193,26 @@ def performance_row(label: str, target: float, actual: float) -> str:
         f'<div><span class="status-pill {status_class}">{status_text}</span></div>'
         '</div>'
     )
+
+
+def finish_figure(figure):
+    """Mantém os gráficos idênticos em tema claro, escuro e extensões do navegador."""
+    figure.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Arial, sans-serif", color=COLORS["text"], size=12),
+        title_font=dict(color=COLORS["navy"], size=16),
+        legend_font=dict(color=COLORS["text"], size=11),
+        hoverlabel=dict(bgcolor="white", font_color=COLORS["text"]),
+    )
+    figure.update_xaxes(
+        color=COLORS["muted"],
+        gridcolor="#E9EEF3",
+        zerolinecolor="#D7E0E8",
+    )
+    figure.update_yaxes(color=COLORS["muted"], gridcolor="rgba(0,0,0,0)")
+    return figure
 
 
 def repository_file_datetime(path: Path) -> datetime:
@@ -529,7 +549,7 @@ resolution_reason_figure = px.bar(
 )
 resolution_reason_figure.update_traces(texttemplate="%{text:.1f} h", textposition="outside", cliponaxis=False)
 resolution_reason_figure.update_layout(height=430, margin=dict(l=10, r=65, t=10, b=35), xaxis_title="Horas corridas", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
-st.plotly_chart(resolution_reason_figure, width="stretch", config={"displayModeBar": False})
+st.plotly_chart(finish_figure(resolution_reason_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
 st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume, velocidade e satisfação de cada responsável.</div></div>', unsafe_allow_html=True)
 agent_rows = []
@@ -568,6 +588,7 @@ for _, agent in agent_summary.iterrows():
     )
 st.markdown(f'<div class="agent-grid">{"".join(agent_cards)}</div>', unsafe_allow_html=True)
 
+st.markdown('<div class="section-heading"><div class="section-title">Voz do cliente</div><div class="section-caption">Reputação da marca e satisfação com o atendimento.</div></div>', unsafe_allow_html=True)
 ra_column, csat_column = st.columns(2, gap="large")
 with ra_column:
     st.markdown(
@@ -583,52 +604,66 @@ with ra_column:
         f'<div class="mini-item"><div class="mini-value" style="font-size:13px">{html.escape(RA_TEMPO_MEDIO_RESPOSTA)}</div><div class="mini-label">Tempo de resposta</div></div>'
         '</div></div>', unsafe_allow_html=True,
     )
-    if selected_period != default_period:
-        st.info(f"O Reclame Aqui está preenchido manualmente para {NOME_MES_REFERENCIA}; os filtros não alteram esses números.")
     complaints_change = RA_RECLAMACOES - RA_RECLAMACOES_MES_ANTERIOR
     change_word = "mais" if complaints_change >= 0 else "menos"
     st.markdown(f'<div class="insight">• Nota atual: <b>{format_decimal(RA_NOTA)}</b> (anterior: {format_decimal(RA_NOTA_MES_ANTERIOR)}).</div><div class="insight">• <b>{format_number(abs(complaints_change))} {change_word}</b> reclamações que no mês anterior.</div>', unsafe_allow_html=True)
-
-    ra_complaints = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_RECLAMACOES), "Quantidade": list(RA_CATEGORIAS_RECLAMACOES.values())}).sort_values("Quantidade")
-    complaint_figure = px.bar(ra_complaints, x="Quantidade", y="Categoria", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
-    complaint_figure.update_traces(textposition="outside", cliponaxis=False)
-    complaint_figure.update_layout(title="Categorias das reclamações", height=280, margin=dict(l=10, r=45, t=45, b=25), xaxis_title="", yaxis_title="", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(complaint_figure, width="stretch", config={"displayModeBar": False})
-
-    if sum(RA_CATEGORIAS_AVALIACOES.values()) > 0:
-        ra_reviews = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_AVALIACOES), "Quantidade": list(RA_CATEGORIAS_AVALIACOES.values())})
-        reviews_figure = px.pie(ra_reviews, names="Categoria", values="Quantidade", hole=.58, color="Categoria", color_discrete_sequence=[COLORS["teal"], COLORS["gold"], COLORS["red"]])
-        reviews_figure.update_layout(title="Categorias das avaliações", height=300, margin=dict(l=15, r=15, t=45, b=20), legend=dict(orientation="h", y=-.05, x=.5, xanchor="center"))
-        st.plotly_chart(reviews_figure, width="stretch", config={"displayModeBar": False})
-    else:
-        st.info("Preencha `RA_CATEGORIAS_AVALIACOES` no início do código para exibir as categorias das avaliações.")
+    if selected_period != default_period:
+        st.info(f"O Reclame Aqui está preenchido para {NOME_MES_REFERENCIA}; os filtros não alteram esses números.")
 
 with csat_column:
     st.markdown(
-        '<div class="info-card"><div class="card-heading">Resultados CSAT</div><div class="card-caption">Somente tickets resolvidos no período filtrado.</div><div class="mini-grid">'
-        f'<div class="mini-item"><div class="mini-value">{format_percent(csat_rate)}</div><div class="mini-label">Índice de satisfação</div></div>'
+        '<div class="info-card"><div class="card-heading">Resultados CSAT</div>'
+        '<div class="card-caption">Somente tickets resolvidos no período filtrado.</div>'
+        f'<div class="ra-score" style="color:{COLORS["navy"]}">{format_percent(csat_rate)}</div><div class="ra-score-label">Índice de satisfação</div>'
+        '<div class="mini-grid">'
         f'<div class="mini-item"><div class="mini-value">{format_percent(survey_response_rate)}</div><div class="mini-label">Taxa de resposta</div></div>'
         f'<div class="mini-item"><div class="mini-value">{format_number(rated_count)}</div><div class="mini-label">Avaliações</div></div>'
+        f'<div class="mini-item"><div class="mini-value" style="color:{COLORS["teal"]}">{format_number(good_count)}</div><div class="mini-label">Positivas</div></div>'
+        f'<div class="mini-item"><div class="mini-value" style="color:{COLORS["red"]}">{format_number(bad_count)}</div><div class="mini-label">Negativas</div></div>'
+        f'<div class="mini-item"><div class="mini-value">{format_number(offered_count)}</div><div class="mini-label">Oferecidas sem resposta</div></div>'
+        f'<div class="mini-item"><div class="mini-value">{format_number(surveyed_count)}</div><div class="mini-label">Pesquisas oferecidas</div></div>'
         '</div></div>', unsafe_allow_html=True,
     )
-    st.markdown(f'<div class="insight">• <b style="color:#16886A">{format_number(good_count)} positivas</b> e <b style="color:#C83C4D">{format_number(bad_count)} negativas</b>.</div><div class="insight">• {format_number(rated_count)} respostas em {format_number(surveyed_count)} pesquisas oferecidas.</div>', unsafe_allow_html=True)
-    csat_frame = pd.DataFrame({"Avaliação": ["Positiva", "Negativa"], "Tickets": [good_count, bad_count]})
-    csat_figure = px.pie(csat_frame, names="Avaliação", values="Tickets", hole=.66, color="Avaliação", color_discrete_map={"Positiva": COLORS["teal"], "Negativa": COLORS["red"]})
-    csat_figure.update_traces(textposition="outside", textinfo="value+percent", marker=dict(line=dict(color="white", width=3)))
-    csat_figure.update_layout(title="Composição das avaliações", height=350, margin=dict(l=25, r=25, t=48, b=25), legend=dict(orientation="h", y=-.02, x=.5, xanchor="center", title=""), paper_bgcolor="rgba(0,0,0,0)", annotations=[dict(text=f"<b>{format_percent(csat_rate)}</b><br><span style='font-size:11px'>CSAT</span>", x=.5, y=.5, font=dict(size=20, color=COLORS["navy"]), showarrow=False)])
-    st.plotly_chart(csat_figure, width="stretch", config={"displayModeBar": False})
+    st.markdown(f'<div class="insight">• <b style="color:{COLORS["teal"]}">{format_number(good_count)} positivas</b> e <b style="color:{COLORS["red"]}">{format_number(bad_count)} negativas</b>.</div><div class="insight">• {format_number(rated_count)} respostas em {format_number(surveyed_count)} pesquisas oferecidas.</div>', unsafe_allow_html=True)
 
-    bad_reasons = (
-        solved[solved["Satisfaction Score"].eq("Bad")]["Motivo do Contato [list]"]
-        .value_counts().rename_axis("Motivo").reset_index(name="Avaliações ruins").sort_values("Avaliações ruins")
-    )
+ra_complaints = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_RECLAMACOES), "Quantidade": list(RA_CATEGORIAS_RECLAMACOES.values())}).sort_values("Quantidade")
+complaint_figure = px.bar(ra_complaints, x="Quantidade", y="Categoria", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
+complaint_figure.update_traces(textposition="outside", cliponaxis=False)
+complaint_figure.update_layout(title="Categorias das reclamações", height=330, margin=dict(l=10, r=45, t=52, b=30), xaxis_title="", yaxis_title="")
+
+csat_frame = pd.DataFrame({"Avaliação": ["Positiva", "Negativa"], "Tickets": [good_count, bad_count]})
+csat_figure = px.pie(csat_frame, names="Avaliação", values="Tickets", hole=.66, color="Avaliação", color_discrete_map={"Positiva": COLORS["teal"], "Negativa": COLORS["red"]})
+csat_figure.update_traces(textposition="outside", textinfo="value+percent", marker=dict(line=dict(color="white", width=3)))
+csat_figure.update_layout(title="Composição do CSAT", height=330, margin=dict(l=25, r=25, t=52, b=30), legend=dict(orientation="h", y=-.04, x=.5, xanchor="center", title=""), annotations=[dict(text=f"<b>{format_percent(csat_rate)}</b><br><span style='font-size:11px'>CSAT</span>", x=.5, y=.5, font=dict(size=20, color=COLORS["navy"]), showarrow=False)])
+
+chart_left, chart_right = st.columns(2, gap="large")
+with chart_left:
+    st.plotly_chart(finish_figure(complaint_figure), width="stretch", theme=None, config={"displayModeBar": False})
+with chart_right:
+    st.plotly_chart(finish_figure(csat_figure), width="stretch", theme=None, config={"displayModeBar": False})
+
+bad_reasons = (
+    solved[solved["Satisfaction Score"].eq("Bad")]["Motivo do Contato [list]"]
+    .value_counts().rename_axis("Motivo").reset_index(name="Avaliações ruins").sort_values("Avaliações ruins")
+)
+chart_left, chart_right = st.columns(2, gap="large")
+with chart_left:
+    if sum(RA_CATEGORIAS_AVALIACOES.values()) > 0:
+        ra_reviews = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_AVALIACOES), "Quantidade": list(RA_CATEGORIAS_AVALIACOES.values())})
+        reviews_figure = px.pie(ra_reviews, names="Categoria", values="Quantidade", hole=.62, color="Categoria", color_discrete_map={"Positivas": COLORS["teal"], "Neutras": COLORS["gold"], "Negativas": COLORS["red"]})
+        reviews_figure.update_traces(textposition="inside", textinfo="percent", marker=dict(line=dict(color="white", width=3)))
+        reviews_figure.update_layout(title="Categorias das avaliações no Reclame Aqui", height=330, margin=dict(l=25, r=25, t=52, b=30), legend=dict(orientation="h", y=-.04, x=.5, xanchor="center", title=""))
+        st.plotly_chart(finish_figure(reviews_figure), width="stretch", theme=None, config={"displayModeBar": False})
+    else:
+        st.info("Preencha `RA_CATEGORIAS_AVALIACOES` no início do código.")
+with chart_right:
     if bad_reasons.empty:
         st.success("Nenhuma avaliação ruim no período filtrado.")
     else:
         bad_figure = px.bar(bad_reasons, x="Avaliações ruins", y="Motivo", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["red"]])
         bad_figure.update_traces(textposition="outside", cliponaxis=False)
-        bad_figure.update_layout(title="Motivos das avaliações ruins", height=max(280, 42 * len(bad_reasons)), margin=dict(l=10, r=45, t=45, b=30), xaxis_title="", yaxis_title="", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(bad_figure, width="stretch", config={"displayModeBar": False})
+        bad_figure.update_layout(title="Motivos das avaliações ruins no CSAT", height=330, margin=dict(l=10, r=45, t=52, b=30), xaxis_title="", yaxis_title="")
+        st.plotly_chart(finish_figure(bad_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
 st.markdown('<div class="section-heading"><div class="section-title">Tickets resolvidos por motivo</div><div class="section-caption">Principais motivos no período, excluindo Uso Interno.</div></div>', unsafe_allow_html=True)
 external_solved = solved[~solved["Motivo do Contato [list]"].str.contains("uso interno", case=False, na=False)]
@@ -636,6 +671,6 @@ reason_counts = external_solved["Motivo do Contato [list]"].value_counts().renam
 reason_figure = px.bar(reason_counts, x="Tickets", y="Motivo", orientation="h", text_auto=True, color="Tickets", color_continuous_scale=[[0, "#CFE2F5"], [1, COLORS["navy"]]])
 reason_figure.update_traces(textposition="outside", cliponaxis=False)
 reason_figure.update_layout(height=430, margin=dict(l=10, r=55, t=15, b=35), xaxis_title="Tickets resolvidos", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
-st.plotly_chart(reason_figure, width="stretch", config={"displayModeBar": False})
+st.plotly_chart(finish_figure(reason_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
 st.markdown(f'<div class="source-note">Fonte: {html.escape(source_name)} • atualização no GitHub: {html.escape(updated_text)} • {format_number(len(solved))} tickets resolvidos após os filtros</div>', unsafe_allow_html=True)
