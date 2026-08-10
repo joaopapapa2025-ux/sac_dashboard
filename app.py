@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from datetime import datetime, timezone
 import html
+import subprocess
 
 import pandas as pd
 import plotly.express as px
@@ -13,7 +15,7 @@ st.set_page_config(
     page_title="Fechamento do SAC",
     page_icon="🎧",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -32,21 +34,29 @@ META_TEMPO_RESPOSTA_H = 28.0
 META_TEMPO_RESOLUCAO_H = 55.0
 
 # Reclame Aqui
-RA_NOTA = 8.7
-RA_NOTA_MES_ANTERIOR = 8.5
-RA_RECLAMACOES = 19
-RA_RECLAMACOES_MES_ANTERIOR = 14
+RA_NOTA = 8.5
+RA_NOTA_MES_ANTERIOR = 8.3
+RA_RECLAMACOES = 14
+RA_RECLAMACOES_MES_ANTERIOR = 7
 RA_RESPONDIDAS_PCT = 100.0
-RA_VOLTARIAM_PCT = 80.8
-RA_INDICE_SOLUCAO_PCT = 94.2
-RA_NOTA_CONSUMIDOR = 7.77
-RA_TEMPO_MEDIO_RESPOSTA = "8 dias e 5 horas"
+RA_VOLTARIAM_PCT = 77.8
+RA_INDICE_SOLUCAO_PCT = 91.1
+RA_NOTA_CONSUMIDOR = 7.22
+RA_TEMPO_MEDIO_RESPOSTA = "8 dias e 21 horas"
 
-# Quantidade de reclamações por motivo.
-RA_MOTIVOS = {
+# Categorias das reclamações no Reclame Aqui.
+RA_CATEGORIAS_RECLAMACOES = {
     "Problemas de qualidade": 7,
     "Questões logísticas": 6,
     "Experiência de compra e atendimento": 1,
+}
+
+# Categorias das avaliações no Reclame Aqui. Preencha as quantidades manualmente.
+# Se todas estiverem zeradas, o dashboard mostrará um aviso no lugar do gráfico.
+RA_CATEGORIAS_AVALIACOES = {
+    "Positivas": 0,
+    "Neutras": 0,
+    "Negativas": 0,
 }
 
 # =============================================================================
@@ -125,6 +135,10 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     frame["Full resolution time in minutes"] = pd.to_numeric(
         frame["Full resolution time in minutes"], errors="coerce"
     )
+    # Horas corridas: diferença real entre criação e solução, sem calendário comercial.
+    frame["Resolution elapsed hours"] = (
+        frame["Solved at"] - frame["Created at"]
+    ).dt.total_seconds() / 3600
     frame["Motivo do Contato [list]"] = (
         frame["Motivo do Contato [list]"]
         .replace({"-": "Não informado", "": "Não informado"})
@@ -142,12 +156,11 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     return frame
 
 
-def filter_reference_month(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    start = pd.Timestamp(ANO_REFERENCIA, MES_REFERENCIA, 1)
-    end = start + pd.offsets.MonthBegin(1)
-    created = frame[frame["Created at"].ge(start) & frame["Created at"].lt(end)].copy()
-    solved = frame[frame["Solved at"].ge(start) & frame["Solved at"].lt(end)].copy()
-    return created, solved
+def resolved_tickets(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame[
+        frame["Solved at"].notna()
+        & frame["Status"].fillna("").str.casefold().isin({"solved", "closed"})
+    ].copy()
 
 
 def metric_card(label: str, value: str, detail: str, tone: str = "blue") -> str:
@@ -182,10 +195,35 @@ def performance_row(label: str, target: float, actual: float) -> str:
     )
 
 
-def source_from_repository_or_upload() -> tuple[str | bytes | None, str, float | int]:
+def repository_file_datetime(path: Path) -> datetime:
+    """Data do último commit que alterou a ZIP; fallback para modificação do arquivo."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cI", "--", path.name],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        if result.stdout.strip():
+            return datetime.fromisoformat(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def source_from_repository_or_upload() -> tuple[
+    str | bytes | None, str, float | int, datetime | None
+]:
     repository_zip = find_zip()
     if repository_zip:
-        return str(repository_zip), repository_zip.name, repository_zip.stat().st_mtime
+        return (
+            str(repository_zip),
+            repository_zip.name,
+            repository_zip.stat().st_mtime,
+            repository_file_datetime(repository_zip),
+        )
 
     uploaded = st.file_uploader(
         "A ZIP ainda não está no repositório. Selecione-a para testar:",
@@ -194,8 +232,8 @@ def source_from_repository_or_upload() -> tuple[str | bytes | None, str, float |
     )
     if uploaded:
         payload = uploaded.getvalue()
-        return payload, uploaded.name, len(payload)
-    return None, "", 0
+        return payload, uploaded.name, len(payload), datetime.now().astimezone()
+    return None, "", 0, None
 
 
 st.markdown(
@@ -315,31 +353,87 @@ st.markdown(
 )
 
 
-source, source_name, source_signature = source_from_repository_or_upload()
+source, source_name, source_signature, source_updated_at = source_from_repository_or_upload()
 if source is None:
     st.info("Envie para o GitHub um arquivo com nome `export-*.csv.zip`. O dashboard fará a leitura automaticamente.")
     st.stop()
 
 try:
     raw = read_zip(source, source_signature)
-    created, solved = filter_reference_month(raw)
+    solved_all = resolved_tickets(raw)
 except Exception as error:
     st.error("Não foi possível ler a ZIP do Zendesk.")
     st.exception(error)
     st.stop()
 
-if created.empty and solved.empty:
-    st.error(
-        f"A ZIP não possui tickets em {NOME_MES_REFERENCIA}. "
-        "Atualize ANO_REFERENCIA e MES_REFERENCIA no bloco manual do início do código."
-    )
+if solved_all.empty:
+    st.error("A ZIP não possui tickets resolvidos.")
     st.stop()
 
+solved_all["Assignee"] = solved_all["Assignee"].fillna("Não atribuído").replace("", "Não atribuído")
+available_months = sorted(solved_all["Solved at"].dropna().dt.to_period("M").unique(), reverse=True)
+default_period = pd.Period(year=ANO_REFERENCIA, month=MES_REFERENCIA, freq="M")
+default_index = available_months.index(default_period) if default_period in available_months else 0
 
-# Indicadores calculados exclusivamente a partir da ZIP.
+st.sidebar.header("Filtros")
+selected_period = st.sidebar.selectbox(
+    "Mês de resolução",
+    available_months,
+    index=default_index,
+    format_func=lambda value: value.strftime("%m/%Y"),
+)
+month_start = selected_period.start_time
+month_end = selected_period.end_time
+month_solved = solved_all[
+    solved_all["Solved at"].between(month_start, month_end, inclusive="both")
+].copy()
+
+first_day = month_solved["Solved at"].min().date()
+last_day = month_solved["Solved at"].max().date()
+selected_dates = st.sidebar.date_input(
+    "Dias considerados",
+    value=(first_day, last_day),
+    min_value=first_day,
+    max_value=last_day,
+    format="DD/MM/YYYY",
+)
+if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+    selected_start, selected_end = selected_dates
+else:
+    selected_start = selected_end = selected_dates[0] if isinstance(selected_dates, tuple) else selected_dates
+
+agent_options = sorted(month_solved["Assignee"].dropna().unique().tolist())
+selected_agents = st.sidebar.multiselect("Agentes", agent_options, placeholder="Todos os agentes")
+
+start_datetime = pd.Timestamp(selected_start)
+end_datetime = pd.Timestamp(selected_end) + pd.Timedelta(days=1)
+solved = month_solved[
+    month_solved["Solved at"].ge(start_datetime) & month_solved["Solved at"].lt(end_datetime)
+].copy()
+if selected_agents:
+    solved = solved[solved["Assignee"].isin(selected_agents)].copy()
+
+if solved.empty:
+    st.warning("Nenhum ticket resolvido corresponde aos filtros selecionados.")
+    st.stop()
+
+MONTH_NAMES = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
+period_name = f"{MONTH_NAMES[selected_period.month]} de {selected_period.year}"
+if source_updated_at:
+    updated_stamp = pd.Timestamp(source_updated_at)
+    if updated_stamp.tzinfo is None:
+        updated_stamp = updated_stamp.tz_localize("UTC")
+    updated_stamp = updated_stamp.tz_convert("America/Sao_Paulo")
+    updated_text = updated_stamp.strftime("%d/%m/%Y às %H:%M")
+else:
+    updated_text = "não disponível"
+
+# Indicadores: somente tickets resolvidos no período filtrado.
 response_hours = solved["First reply time in minutes"].median() / 60
-resolution_hours = solved["Full resolution time in minutes"].median() / 60
-
+resolution_hours = solved["Resolution elapsed hours"].median()
 satisfaction = solved["Satisfaction Score"].fillna("Not Offered")
 good_count = int(satisfaction.eq("Good").sum())
 bad_count = int(satisfaction.eq("Bad").sum())
@@ -348,73 +442,82 @@ rated_count = good_count + bad_count
 surveyed_count = rated_count + offered_count
 csat_rate = good_count / rated_count if rated_count else float("nan")
 survey_response_rate = rated_count / surveyed_count if surveyed_count else float("nan")
-
 response_status = "Dentro da meta" if response_hours <= META_TEMPO_RESPOSTA_H else "Acima da meta"
 resolution_status = "Dentro da meta" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "Acima da meta"
 
-
 st.markdown(
-    f"""
-    <div class="hero">
-      <div class="hero-eyebrow">GESTÃO DE ATENDIMENTO</div>
-      <h1>Fechamento do SAC • {html.escape(NOME_MES_REFERENCIA)}</h1>
-      <p>Tempo de atendimento, satisfação do cliente e reputação da marca em uma leitura executiva.</p>
-    </div>
-    """,
+    '<div class="hero">'
+    '<div class="hero-eyebrow">GESTÃO DE ATENDIMENTO</div>'
+    f'<h1>Fechamento do SAC • {html.escape(period_name)}</h1>'
+    '<p>Indicadores calculados somente sobre tickets resolvidos, em horas corridas.</p>'
+    f'<p style="margin-top:10px;font-size:12px;opacity:.72">Base atualizada no GitHub em {html.escape(updated_text)}</p>'
+    '</div>',
     unsafe_allow_html=True,
 )
 
-cards = "".join(
-    [
-        metric_card(
-            "Tempo de resposta",
-            f"{format_decimal(response_hours)} h",
-            f"Meta: {format_decimal(META_TEMPO_RESPOSTA_H)} h • {response_status}",
-            "teal" if response_hours <= META_TEMPO_RESPOSTA_H else "red",
-        ),
-        metric_card(
-            "Tempo de resolução",
-            f"{format_decimal(resolution_hours)} h",
-            f"Meta: {format_decimal(META_TEMPO_RESOLUCAO_H)} h • {resolution_status}",
-            "teal" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "red",
-        ),
-        metric_card(
-            "CSAT",
-            format_percent(csat_rate),
-            f"{format_number(rated_count)} avaliações respondidas",
-            "blue",
-        ),
-        metric_card(
-            "Tickets resolvidos",
-            format_number(len(solved)),
-            f"{format_number(len(created))} criados no mês",
-            "gold",
-        ),
-    ]
-)
+cards = "".join([
+    metric_card("Tempo de resposta", f"{format_decimal(response_hours)} h", f"Meta: {format_decimal(META_TEMPO_RESPOSTA_H)} h • {response_status}", "teal" if response_hours <= META_TEMPO_RESPOSTA_H else "red"),
+    metric_card("Tempo de resolução", f"{format_decimal(resolution_hours)} h", f"Horas corridas • Meta: {format_decimal(META_TEMPO_RESOLUCAO_H)} h", "teal" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "red"),
+    metric_card("CSAT", format_percent(csat_rate), f"{format_number(rated_count)} avaliações respondidas", "blue"),
+    metric_card("Tickets resolvidos", format_number(len(solved)), f"De {selected_start.strftime('%d/%m')} a {selected_end.strftime('%d/%m')}", "gold"),
+])
 st.markdown(f'<div class="metric-grid">{cards}</div>', unsafe_allow_html=True)
 
-
-st.markdown(
-    '<div class="section-heading"><div class="section-title">Meta x realizado</div>'
-    '<div class="section-caption">Comparação direta dos dois indicadores de velocidade. Quanto menor, melhor.</div></div>',
-    unsafe_allow_html=True,
-)
-performance_html = (
-    performance_row("Tempo de resposta", META_TEMPO_RESPOSTA_H, response_hours)
-    + performance_row("Tempo de resolução", META_TEMPO_RESOLUCAO_H, resolution_hours)
-)
+st.markdown('<div class="section-heading"><div class="section-title">Meta x realizado</div><div class="section-caption">Quanto menor o tempo, melhor o resultado.</div></div>', unsafe_allow_html=True)
+performance_html = performance_row("Tempo de resposta", META_TEMPO_RESPOSTA_H, response_hours) + performance_row("Tempo de resolução (horas corridas)", META_TEMPO_RESOLUCAO_H, resolution_hours)
 st.markdown(f'<div class="performance-table">{performance_html}</div>', unsafe_allow_html=True)
 
+st.markdown('<div class="section-heading"><div class="section-title">Tempo de resolução por motivo</div><div class="section-caption">Mediana em horas corridas, somente para tickets resolvidos.</div></div>', unsafe_allow_html=True)
+resolution_reason = (
+    solved.groupby("Motivo do Contato [list]", as_index=False)
+    .agg(**{"Tempo mediano (h)": ("Resolution elapsed hours", "median"), "Tickets": ("Id", "count")})
+    .dropna(subset=["Tempo mediano (h)"])
+)
+resolution_reason = resolution_reason.nlargest(12, "Tickets").sort_values("Tempo mediano (h)")
+resolution_reason_figure = px.bar(
+    resolution_reason, x="Tempo mediano (h)", y="Motivo do Contato [list]", orientation="h",
+    text="Tempo mediano (h)", hover_data={"Tickets": True, "Tempo mediano (h)": ":.1f"},
+    color="Tempo mediano (h)", color_continuous_scale=[[0, "#CFE8E0"], [1, COLORS["navy"]]],
+)
+resolution_reason_figure.update_traces(texttemplate="%{text:.1f} h", textposition="outside", cliponaxis=False)
+resolution_reason_figure.update_layout(height=430, margin=dict(l=10, r=65, t=10, b=35), xaxis_title="Horas corridas", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
+st.plotly_chart(resolution_reason_figure, width="stretch", config={"displayModeBar": False})
+
+st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume, velocidade e satisfação de cada responsável.</div></div>', unsafe_allow_html=True)
+agent_rows = []
+for agent_name, agent_data in solved.groupby("Assignee"):
+    agent_satisfaction = agent_data["Satisfaction Score"]
+    agent_good = int(agent_satisfaction.eq("Good").sum())
+    agent_bad = int(agent_satisfaction.eq("Bad").sum())
+    agent_rated = agent_good + agent_bad
+    agent_rows.append({
+        "Agente": agent_name,
+        "Tickets resolvidos": len(agent_data),
+        "Resposta mediana (h)": agent_data["First reply time in minutes"].median() / 60,
+        "Resolução mediana (h)": agent_data["Resolution elapsed hours"].median(),
+        "Avaliações": agent_rated,
+        "CSAT": agent_good / agent_rated if agent_rated else float("nan"),
+    })
+agent_summary = pd.DataFrame(agent_rows).sort_values("Tickets resolvidos", ascending=False)
+agent_chart_col, agent_table_col = st.columns([.9, 1.35], gap="large")
+with agent_chart_col:
+    agent_figure = px.bar(agent_summary.sort_values("Tickets resolvidos"), x="Tickets resolvidos", y="Agente", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
+    agent_figure.update_traces(textposition="outside", cliponaxis=False)
+    agent_figure.update_layout(height=max(280, 65 * len(agent_summary)), margin=dict(l=10, r=45, t=15, b=30), xaxis_title="Tickets resolvidos", yaxis_title="", paper_bgcolor="white", plot_bgcolor="white")
+    st.plotly_chart(agent_figure, width="stretch", config={"displayModeBar": False})
+with agent_table_col:
+    agent_display = agent_summary.copy()
+    agent_display["Resposta mediana (h)"] = agent_display["Resposta mediana (h)"].map(lambda x: format_decimal(x))
+    agent_display["Resolução mediana (h)"] = agent_display["Resolução mediana (h)"].map(lambda x: format_decimal(x))
+    agent_display["CSAT"] = agent_display["CSAT"].map(format_percent)
+    st.dataframe(agent_display, hide_index=True, width="stretch", height=max(280, 65 * len(agent_summary)))
 
 ra_column, csat_column = st.columns(2, gap="large")
-
 with ra_column:
     st.markdown(
         '<div class="info-card"><div class="card-heading">♥ Reclame Aqui</div>'
-        '<div class="card-caption">Indicadores atualizados manualmente no início do código.</div>'
-        f'<div class="ra-score">{format_decimal(RA_NOTA)}</div>'
-        '<div class="ra-score-label">Nota geral no período</div>'
+        f'<div class="card-caption">Preenchimento manual • referência: {html.escape(NOME_MES_REFERENCIA)}</div>'
+        f'<div class="ra-score">{format_decimal(RA_NOTA)}</div><div class="ra-score-label">Nota geral no período</div>'
         '<div class="mini-grid">'
         f'<div class="mini-item"><div class="mini-value">{format_number(RA_RECLAMACOES)}</div><div class="mini-label">Reclamações</div></div>'
         f'<div class="mini-item"><div class="mini-value">{format_decimal(RA_RESPONDIDAS_PCT)}%</div><div class="mini-label">Respondidas</div></div>'
@@ -422,150 +525,61 @@ with ra_column:
         f'<div class="mini-item"><div class="mini-value">{format_decimal(RA_VOLTARIAM_PCT)}%</div><div class="mini-label">Voltariam a comprar</div></div>'
         f'<div class="mini-item"><div class="mini-value">{format_decimal(RA_NOTA_CONSUMIDOR, 2)}</div><div class="mini-label">Nota consumidor</div></div>'
         f'<div class="mini-item"><div class="mini-value" style="font-size:13px">{html.escape(RA_TEMPO_MEDIO_RESPOSTA)}</div><div class="mini-label">Tempo de resposta</div></div>'
-        '</div></div>',
-        unsafe_allow_html=True,
+        '</div></div>', unsafe_allow_html=True,
     )
-
-    if RA_NOTA > RA_NOTA_MES_ANTERIOR:
-        st.markdown(
-            f'<div class="insight">↗ A nota aumentou de <b>{format_decimal(RA_NOTA_MES_ANTERIOR)}</b> para <b>{format_decimal(RA_NOTA)}</b>.</div>',
-            unsafe_allow_html=True,
-        )
-    elif RA_NOTA < RA_NOTA_MES_ANTERIOR:
-        st.markdown(
-            f'<div class="insight">↘ A nota passou de <b>{format_decimal(RA_NOTA_MES_ANTERIOR)}</b> para <b>{format_decimal(RA_NOTA)}</b>.</div>',
-            unsafe_allow_html=True,
-        )
-
+    if selected_period != default_period:
+        st.info(f"O Reclame Aqui está preenchido manualmente para {NOME_MES_REFERENCIA}; os filtros não alteram esses números.")
     complaints_change = RA_RECLAMACOES - RA_RECLAMACOES_MES_ANTERIOR
     change_word = "mais" if complaints_change >= 0 else "menos"
-    st.markdown(
-        f'<div class="insight">• Recebemos <b>{format_number(RA_RECLAMACOES)}</b> reclamações, '
-        f'<b>{format_number(abs(complaints_change))} {change_word}</b> que no mês anterior.</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(f'<div class="insight">• Nota atual: <b>{format_decimal(RA_NOTA)}</b> (anterior: {format_decimal(RA_NOTA_MES_ANTERIOR)}).</div><div class="insight">• <b>{format_number(abs(complaints_change))} {change_word}</b> reclamações que no mês anterior.</div>', unsafe_allow_html=True)
 
-    ra_reasons = (
-        pd.DataFrame({"Motivo": list(RA_MOTIVOS), "Reclamações": list(RA_MOTIVOS.values())})
-        .sort_values("Reclamações")
-    )
-    ra_figure = px.bar(
-        ra_reasons,
-        x="Reclamações",
-        y="Motivo",
-        orientation="h",
-        text_auto=True,
-        color_discrete_sequence=[COLORS["blue"]],
-    )
-    ra_figure.update_traces(marker_line_width=0, textposition="outside", cliponaxis=False)
-    ra_figure.update_layout(
-        title=dict(text="Reclamações por motivo", font=dict(size=15, color=COLORS["navy"])),
-        height=285,
-        margin=dict(l=10, r=45, t=48, b=30),
-        xaxis=dict(title="", showgrid=False, zeroline=False),
-        yaxis=dict(title="", tickfont=dict(size=12)),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
-    )
-    st.plotly_chart(ra_figure, width="stretch", config={"displayModeBar": False})
+    ra_complaints = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_RECLAMACOES), "Quantidade": list(RA_CATEGORIAS_RECLAMACOES.values())}).sort_values("Quantidade")
+    complaint_figure = px.bar(ra_complaints, x="Quantidade", y="Categoria", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["blue"]])
+    complaint_figure.update_traces(textposition="outside", cliponaxis=False)
+    complaint_figure.update_layout(title="Categorias das reclamações", height=280, margin=dict(l=10, r=45, t=45, b=25), xaxis_title="", yaxis_title="", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(complaint_figure, width="stretch", config={"displayModeBar": False})
 
+    if sum(RA_CATEGORIAS_AVALIACOES.values()) > 0:
+        ra_reviews = pd.DataFrame({"Categoria": list(RA_CATEGORIAS_AVALIACOES), "Quantidade": list(RA_CATEGORIAS_AVALIACOES.values())})
+        reviews_figure = px.pie(ra_reviews, names="Categoria", values="Quantidade", hole=.58, color="Categoria", color_discrete_sequence=[COLORS["teal"], COLORS["gold"], COLORS["red"]])
+        reviews_figure.update_layout(title="Categorias das avaliações", height=300, margin=dict(l=15, r=15, t=45, b=20), legend=dict(orientation="h", y=-.05, x=.5, xanchor="center"))
+        st.plotly_chart(reviews_figure, width="stretch", config={"displayModeBar": False})
+    else:
+        st.info("Preencha `RA_CATEGORIAS_AVALIACOES` no início do código para exibir as categorias das avaliações.")
 
 with csat_column:
     st.markdown(
-        '<div class="info-card"><div class="card-heading">Resultados CSAT</div>'
-        '<div class="card-caption">Calculado diretamente a partir das avaliações da ZIP do Zendesk.</div>'
-        '<div class="mini-grid">'
+        '<div class="info-card"><div class="card-heading">Resultados CSAT</div><div class="card-caption">Somente tickets resolvidos no período filtrado.</div><div class="mini-grid">'
         f'<div class="mini-item"><div class="mini-value">{format_percent(csat_rate)}</div><div class="mini-label">Índice de satisfação</div></div>'
         f'<div class="mini-item"><div class="mini-value">{format_percent(survey_response_rate)}</div><div class="mini-label">Taxa de resposta</div></div>'
         f'<div class="mini-item"><div class="mini-value">{format_number(rated_count)}</div><div class="mini-label">Avaliações</div></div>'
-        '</div></div>',
-        unsafe_allow_html=True,
+        '</div></div>', unsafe_allow_html=True,
     )
-    st.markdown(
-        f'<div class="insight">• Recebemos <b style="color:#16886A">{format_number(good_count)} avaliações positivas</b> '
-        f'e <b style="color:#C83C4D">{format_number(bad_count)} negativas</b>.</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="insight">• Das <b>{format_number(surveyed_count)}</b> pesquisas oferecidas, '
-        f'<b>{format_number(rated_count)}</b> foram respondidas.</div>',
-        unsafe_allow_html=True,
-    )
-
-    csat_frame = pd.DataFrame(
-        {"Avaliação": ["Positiva", "Negativa"], "Tickets": [good_count, bad_count]}
-    )
-    csat_figure = px.pie(
-        csat_frame,
-        names="Avaliação",
-        values="Tickets",
-        hole=.66,
-        color="Avaliação",
-        color_discrete_map={"Positiva": COLORS["teal"], "Negativa": COLORS["red"]},
-    )
-    csat_figure.update_traces(
-        textposition="outside",
-        textinfo="value+percent",
-        marker=dict(line=dict(color="white", width=3)),
-        pull=[0, .025],
-    )
-    csat_figure.update_layout(
-        title=dict(text="Composição das avaliações", font=dict(size=15, color=COLORS["navy"])),
-        height=365,
-        margin=dict(l=25, r=25, t=48, b=25),
-        legend=dict(orientation="h", y=-.02, x=.5, xanchor="center", title=""),
-        paper_bgcolor="rgba(0,0,0,0)",
-        annotations=[
-            dict(
-                text=f"<b>{format_percent(csat_rate)}</b><br><span style='font-size:11px'>CSAT</span>",
-                x=.5,
-                y=.5,
-                font=dict(size=20, color=COLORS["navy"]),
-                showarrow=False,
-            )
-        ],
-    )
+    st.markdown(f'<div class="insight">• <b style="color:#16886A">{format_number(good_count)} positivas</b> e <b style="color:#C83C4D">{format_number(bad_count)} negativas</b>.</div><div class="insight">• {format_number(rated_count)} respostas em {format_number(surveyed_count)} pesquisas oferecidas.</div>', unsafe_allow_html=True)
+    csat_frame = pd.DataFrame({"Avaliação": ["Positiva", "Negativa"], "Tickets": [good_count, bad_count]})
+    csat_figure = px.pie(csat_frame, names="Avaliação", values="Tickets", hole=.66, color="Avaliação", color_discrete_map={"Positiva": COLORS["teal"], "Negativa": COLORS["red"]})
+    csat_figure.update_traces(textposition="outside", textinfo="value+percent", marker=dict(line=dict(color="white", width=3)))
+    csat_figure.update_layout(title="Composição das avaliações", height=350, margin=dict(l=25, r=25, t=48, b=25), legend=dict(orientation="h", y=-.02, x=.5, xanchor="center", title=""), paper_bgcolor="rgba(0,0,0,0)", annotations=[dict(text=f"<b>{format_percent(csat_rate)}</b><br><span style='font-size:11px'>CSAT</span>", x=.5, y=.5, font=dict(size=20, color=COLORS["navy"]), showarrow=False)])
     st.plotly_chart(csat_figure, width="stretch", config={"displayModeBar": False})
 
+    bad_reasons = (
+        solved[solved["Satisfaction Score"].eq("Bad")]["Motivo do Contato [list]"]
+        .value_counts().rename_axis("Motivo").reset_index(name="Avaliações ruins").sort_values("Avaliações ruins")
+    )
+    if bad_reasons.empty:
+        st.success("Nenhuma avaliação ruim no período filtrado.")
+    else:
+        bad_figure = px.bar(bad_reasons, x="Avaliações ruins", y="Motivo", orientation="h", text_auto=True, color_discrete_sequence=[COLORS["red"]])
+        bad_figure.update_traces(textposition="outside", cliponaxis=False)
+        bad_figure.update_layout(title="Motivos das avaliações ruins", height=max(280, 42 * len(bad_reasons)), margin=dict(l=10, r=45, t=45, b=30), xaxis_title="", yaxis_title="", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(bad_figure, width="stretch", config={"displayModeBar": False})
 
-st.markdown(
-    '<div class="section-heading"><div class="section-title">O que mais gerou contato</div>'
-    '<div class="section-caption">Principais motivos registrados nos tickets criados no mês.</div></div>',
-    unsafe_allow_html=True,
-)
-
-reason_counts = (
-    created["Motivo do Contato [list]"]
-    .value_counts()
-    .rename_axis("Motivo")
-    .reset_index(name="Tickets")
-    .head(10)
-    .sort_values("Tickets")
-)
-reason_figure = px.bar(
-    reason_counts,
-    x="Tickets",
-    y="Motivo",
-    orientation="h",
-    text_auto=True,
-    color="Tickets",
-    color_continuous_scale=[[0, "#CFE2F5"], [1, COLORS["navy"]]],
-)
+st.markdown('<div class="section-heading"><div class="section-title">Tickets resolvidos por motivo</div><div class="section-caption">Principais motivos no período, excluindo Uso Interno.</div></div>', unsafe_allow_html=True)
+external_solved = solved[~solved["Motivo do Contato [list]"].str.contains("uso interno", case=False, na=False)]
+reason_counts = external_solved["Motivo do Contato [list]"].value_counts().rename_axis("Motivo").reset_index(name="Tickets").head(12).sort_values("Tickets")
+reason_figure = px.bar(reason_counts, x="Tickets", y="Motivo", orientation="h", text_auto=True, color="Tickets", color_continuous_scale=[[0, "#CFE2F5"], [1, COLORS["navy"]]])
 reason_figure.update_traces(textposition="outside", cliponaxis=False)
-reason_figure.update_layout(
-    height=390,
-    margin=dict(l=10, r=55, t=15, b=35),
-    xaxis=dict(title="Tickets", showgrid=False, zeroline=False),
-    yaxis=dict(title="", tickfont=dict(size=12)),
-    coloraxis_showscale=False,
-    paper_bgcolor="white",
-    plot_bgcolor="white",
-)
+reason_figure.update_layout(height=430, margin=dict(l=10, r=55, t=15, b=35), xaxis_title="Tickets resolvidos", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
 st.plotly_chart(reason_figure, width="stretch", config={"displayModeBar": False})
 
-st.markdown(
-    f'<div class="source-note">Fonte automática: {html.escape(source_name)} • '
-    f'{format_number(len(raw))} tickets no arquivo • indicadores filtrados para {html.escape(NOME_MES_REFERENCIA)}</div>',
-    unsafe_allow_html=True,
-)
+st.markdown(f'<div class="source-note">Fonte: {html.escape(source_name)} • atualização no GitHub: {html.escape(updated_text)} • {format_number(len(solved))} tickets resolvidos após os filtros</div>', unsafe_allow_html=True)
