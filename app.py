@@ -496,9 +496,9 @@ resolution_status = "Dentro da meta" if resolution_hours <= META_TEMPO_RESOLUCAO
 st.markdown(
     '<div class="hero">'
     '<div class="hero-eyebrow">GESTÃO DE ATENDIMENTO</div>'
-    f'<h1>Dashboard SAC • {html.escape(period_name)}</h1>'
+    '<h1>Dashboard SAC</h1>'
     '<p>Visão executiva da operação, experiência do cliente e desempenho do time.</p>'
-    f'<p style="margin-top:10px;font-size:12px;opacity:.72">Base atualizada no GitHub em {html.escape(updated_text)}</p>'
+    f'<p style="margin-top:10px;font-size:12px;opacity:.72">Período selecionado: {html.escape(period_name)} • Base atualizada no GitHub em {html.escape(updated_text)}</p>'
     '</div>',
     unsafe_allow_html=True,
 )
