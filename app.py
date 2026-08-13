@@ -421,6 +421,10 @@ if solved_all.empty:
     st.stop()
 
 solved_all["Assignee"] = solved_all["Assignee"].fillna("Não atribuído").replace("", "Não atribuído")
+MONTH_NAMES = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
+}
 month_counts = solved_all["Solved at"].dropna().dt.to_period("M").value_counts()
 # Descarta meses residuais de tickets históricos. Mantém meses com ao menos 5%
 # do volume do principal mês (e no mínimo 5 tickets).
@@ -434,50 +438,63 @@ if default_period in month_counts.index and default_period not in available_mont
 default_index = available_months.index(default_period) if default_period in available_months else 0
 
 st.sidebar.header("Filtros")
-if len(available_months) == 1:
-    selected_period = available_months[0]
-    period_ticket_count = int(month_counts.get(selected_period, 0))
-    st.sidebar.markdown(
-        f'<div style="font-size:14px;margin-bottom:7px">Mês de resolução</div>'
-        f'<div class="filter-period">{selected_period.strftime("%m/%Y")}'
-        f'<span>{format_number(period_ticket_count)} tickets resolvidos</span></div>',
-        unsafe_allow_html=True,
-    )
-else:
+period_mode = st.sidebar.radio(
+    "Período de resolução",
+    ["Mês", "Ano inteiro", "Período personalizado"],
+    horizontal=False,
+)
+
+base_first_day = solved_all["Solved at"].min().date()
+base_last_day = solved_all["Solved at"].max().date()
+selectable_last_day = max(base_last_day, pd.Timestamp.now().date())
+selected_period = None
+
+if period_mode == "Mês":
     selected_period = st.sidebar.selectbox(
-        "Mês de resolução",
+        "Mês",
         available_months,
         index=default_index,
         format_func=lambda value: f'{value.strftime("%m/%Y")} · {format_number(int(month_counts.get(value, 0)))} resolvidos',
     )
-month_start = selected_period.start_time
-month_end = selected_period.end_time
-month_solved = solved_all[
-    solved_all["Solved at"].between(month_start, month_end, inclusive="both")
-].copy()
+    selected_start = selected_period.start_time.date()
+    selected_end = selected_period.end_time.date()
+    period_name = f"{MONTH_NAMES[selected_period.month]} de {selected_period.year}"
 
-first_day = month_solved["Solved at"].min().date()
-last_day = month_solved["Solved at"].max().date()
-selected_dates = st.sidebar.date_input(
-    "Dias considerados",
-    value=(first_day, last_day),
-    min_value=first_day,
-    max_value=last_day,
-    format="DD/MM/YYYY",
-)
-if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
-    selected_start, selected_end = selected_dates
+elif period_mode == "Ano inteiro":
+    available_years = sorted(solved_all["Solved at"].dropna().dt.year.unique().tolist(), reverse=True)
+    default_year_index = available_years.index(ANO_REFERENCIA) if ANO_REFERENCIA in available_years else 0
+    selected_year = st.sidebar.selectbox("Ano", available_years, index=default_year_index)
+    selected_start = pd.Timestamp(selected_year, 1, 1).date()
+    selected_end = pd.Timestamp(selected_year, 12, 31).date()
+    period_name = f"Ano de {selected_year}"
+
 else:
-    selected_start = selected_end = selected_dates[0] if isinstance(selected_dates, tuple) else selected_dates
-
-agent_options = sorted(month_solved["Assignee"].dropna().unique().tolist())
-selected_agents = st.sidebar.multiselect("Agentes", agent_options, placeholder="Todos os agentes")
+    default_custom_start = max(default_period.start_time.date(), base_first_day)
+    default_custom_end = min(default_period.end_time.date(), base_last_day)
+    selected_dates = st.sidebar.date_input(
+        "Intervalo personalizado",
+        value=(default_custom_start, default_custom_end),
+        min_value=base_first_day,
+        max_value=selectable_last_day,
+        format="DD/MM/YYYY",
+    )
+    if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+        selected_start, selected_end = selected_dates
+    else:
+        st.sidebar.info("Selecione também a data final do período.")
+        st.stop()
+    period_name = f"{selected_start.strftime('%d/%m/%Y')} a {selected_end.strftime('%d/%m/%Y')}"
 
 start_datetime = pd.Timestamp(selected_start)
 end_datetime = pd.Timestamp(selected_end) + pd.Timedelta(days=1)
-solved = month_solved[
-    month_solved["Solved at"].ge(start_datetime) & month_solved["Solved at"].lt(end_datetime)
+period_solved = solved_all[
+    solved_all["Solved at"].ge(start_datetime) & solved_all["Solved at"].lt(end_datetime)
 ].copy()
+
+agent_options = sorted(period_solved["Assignee"].dropna().unique().tolist())
+selected_agents = st.sidebar.multiselect("Agentes", agent_options, placeholder="Todos os agentes")
+
+solved = period_solved.copy()
 if selected_agents:
     solved = solved[solved["Assignee"].isin(selected_agents)].copy()
 
@@ -485,11 +502,6 @@ if solved.empty:
     st.warning("Nenhum ticket resolvido corresponde aos filtros selecionados.")
     st.stop()
 
-MONTH_NAMES = {
-    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
-    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
-}
-period_name = f"{MONTH_NAMES[selected_period.month]} de {selected_period.year}"
 if source_updated_at:
     updated_stamp = pd.Timestamp(source_updated_at)
     if updated_stamp.tzinfo is None:
