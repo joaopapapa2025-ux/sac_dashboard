@@ -750,11 +750,17 @@ month_counts = (
 relevant_month_minimum = max(5, int(month_counts.max() * .05))
 relevant_month_counts = month_counts[month_counts.ge(relevant_month_minimum)]
 available_months = sorted(relevant_month_counts.index.tolist(), reverse=True)
-default_period = pd.Period(year=ANO_REFERENCIA, month=MES_REFERENCIA, freq="M")
-if default_period in month_counts.index and default_period not in available_months:
-    available_months.append(default_period)
+reference_period = pd.Period(year=ANO_REFERENCIA, month=MES_REFERENCIA, freq="M")
+if reference_period in month_counts.index and reference_period not in available_months:
+    available_months.append(reference_period)
     available_months.sort(reverse=True)
-default_index = available_months.index(default_period) if default_period in available_months else 0
+current_period = pd.Period(
+    pd.Timestamp.now(tz="America/Sao_Paulo").strftime("%Y-%m"), freq="M"
+)
+# Abre no mês atual quando ele existe na base; caso contrário, usa o mês
+# mais recente disponível na exportação.
+default_period = current_period if current_period in available_months else available_months[0]
+default_index = available_months.index(default_period)
 
 st.sidebar.header("Filtros")
 period_mode = st.sidebar.radio(
@@ -1008,7 +1014,7 @@ with ra_column:
     complaints_change = RA_RECLAMACOES - RA_RECLAMACOES_MES_ANTERIOR
     change_word = "mais" if complaints_change >= 0 else "menos"
     st.markdown(f'<div class="insight">• Nota atual: <b>{format_decimal(RA_NOTA)}</b> (anterior: {format_decimal(RA_NOTA_MES_ANTERIOR)}).</div><div class="insight">• <b>{format_number(abs(complaints_change))} {change_word}</b> reclamações que no mês anterior.</div>', unsafe_allow_html=True)
-    if selected_period != default_period:
+    if selected_period != reference_period:
         st.info(f"O Reclame Aqui está preenchido para {NOME_MES_REFERENCIA}; os filtros não alteram esses números.")
 
 with csat_column:
