@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 import html
 import subprocess
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 
 st.set_page_config(
-    page_title="Fechamento do SAC",
+    page_title="Dashboard SAC",
     page_icon="🎧",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -84,15 +85,92 @@ REQUIRED_COLUMNS = {
     "Id",
     "Assignee",
     "Group",
+    "Tags",
     "Status",
     "Via",
     "Created at",
+    "Initially assigned at",
     "Solved at",
+    "Replies",
     "Satisfaction Score",
     "First reply time in minutes",
     "Full resolution time in minutes",
     "Motivo do Contato [list]",
 }
+
+# Mesmas exceções selecionadas manualmente no filtro da antiga planilha.
+# Elas ficam explícitas aqui para que o dashboard seja reproduzível e auditável.
+TAGS_EXCLUIDAS_PLANILHA = {
+    "06042026_expirado informação_pedido system_email_notification_failure",
+    "06042026_expirado interação system_email_notification_failure",
+    "06042026_expirado sem_resposta",
+    "06042026_expirado system_email_notification_failure",
+    "180626_reenvio cancelamento_pedido",
+    "180626_reenvio informação_pedido",
+    "180626_reenvio reclamação_sobre_pedido",
+    "20251222_expirados alteração_sensorial qualidade",
+    "20251229_expirados closed_by_merge reclamação_sobre_pedido",
+    "20260413_expirados cancelamento_assinatura",
+    "20260413_expirados problema_com_o_cadastro",
+    "20260415_ra avaria reclame_aqui",
+    "20260415_ra closed_by_merge",
+    "20260415_ra informação_pedido",
+    "20260415_ra informações_sobre_produtos",
+    "20260420_expirado devolução_de_produtos",
+    "20260423_expirado cancelamento_assinatura",
+    "20260423_expirado closed_by_merge",
+    "20260423_expirado informação_pedido",
+    "20260423_expirado interação",
+    "20260423_expirado sem_resposta",
+    "20260428_expirado canal_especial informação_pedido",
+    "20260512_expirado closed_by_merge informação_pedido",
+    "20260626_expirados closed_by_merge",
+    "20260706_expirado onde_encontrar",
+    "20260722_expirado informação_pedido",
+    "22062026 sem_resposta",
+    "22062026_reativação cancelamento_assinatura",
+    "22062026_reativação informação_pedido",
+    "24042026 cancelamento_assinatura",
+    "27042026 cupom_de_desconto",
+    "alteração qualidade sensorial",
+    "alteração_assinatura informações_sobre_produtos",
+    "alteração_sensorial closed_by_merge qualidade",
+    "alteração_sensorial closed_by_merge qualidade system_email_notification_failure",
+    "alteração_sensorial devolução_de_produtos",
+    "alteração_sensorial feedback",
+    "alteração_sensorial qualidade",
+    "alteração_sensorial qualidade system_email_notification_failure",
+    "alteração_sensorial reclame_aqui",
+    "alteração_sensorial reclame_aqui system_email_notification_failure",
+    "avaria reclame_aqui",
+    "cadastro_",
+    "canal_de_atendimento_para_nutricionistas",
+    "canal_especial qualidade",
+    "cancelamento_assinatura closed_by_merge",
+    "cancelamento_pedido closed_by_merge",
+    "cancelamento_pedido reclamacao_pedidos_ecom",
+    "closed_by_merge dúvida_sobre_visitação",
+    "closed_by_merge dúvidas_no_processo_de_compra",
+    "closed_by_merge marketing_de_influência",
+    "closed_by_merge uso_interno",
+    "duvida_acao_promocional reclamação_sobre_pedido",
+    "elogio feedback",
+    "feedback returning_visitor",
+}
+
+# Feriados utilizados pela fórmula NETWORKDAYS da planilha original.
+FERIADOS_PLANILHA = np.array(
+    [
+        "2025-01-01", "2025-02-24", "2025-02-25", "2025-04-21",
+        "2025-05-01", "2025-06-19", "2025-09-07", "2025-09-08",
+        "2025-10-12", "2025-11-02", "2025-11-15", "2025-11-20",
+        "2025-12-25", "2026-01-01", "2026-02-16", "2026-02-17",
+        "2026-04-03", "2026-04-21", "2026-05-01", "2026-06-04",
+        "2026-09-07", "2026-09-08", "2026-10-12", "2026-11-02",
+        "2026-11-15", "2026-11-20", "2026-12-25",
+    ],
+    dtype="datetime64[D]",
+)
 
 
 def format_number(value: float | int) -> str:
@@ -116,6 +194,32 @@ def find_zip() -> Path | None:
     return files[0] if files else None
 
 
+def first_reply_hours_like_spreadsheet(created_at: pd.Timestamp, assigned_at: pd.Timestamp) -> float:
+    """Replica o First Reply H: criação até primeira atribuição, sem fins de semana/feriados."""
+    if pd.isna(created_at) or pd.isna(assigned_at):
+        return float("nan")
+
+    start = pd.Timestamp(created_at)
+    end = pd.Timestamp(assigned_at)
+    direction = 1
+    if end < start:
+        start, end = end, start
+        direction = -1
+
+    start_day = np.datetime64(start.date(), "D")
+    end_day = np.datetime64(end.date(), "D")
+    business_days = np.busday_count(
+        start_day,
+        end_day + np.timedelta64(1, "D"),
+        weekmask="1111100",
+        holidays=FERIADOS_PLANILHA,
+    )
+    start_hour = (start - start.normalize()).total_seconds() / 3600
+    end_hour = (end - end.normalize()).total_seconds() / 3600
+    elapsed = (business_days - 1) * 24 + end_hour - start_hour
+    return round(direction * elapsed, 1)
+
+
 @st.cache_data(show_spinner="Lendo a base detalhada do Zendesk...")
 def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     del signature
@@ -127,8 +231,18 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
         raise ValueError("A base não contém as colunas esperadas: " + ", ".join(sorted(missing)))
 
     frame = frame[list(REQUIRED_COLUMNS)].copy()
+    original_rows = len(frame)
+    has_id = frame["Id"].fillna("").str.strip().ne("")
+    frame_with_id = frame[has_id].drop_duplicates(subset=["Id"], keep="last")
+    frame = pd.concat([frame_with_id, frame[~has_id]], ignore_index=True)
+    frame.attrs["duplicates_removed"] = original_rows - len(frame)
+
     frame["Created at"] = pd.to_datetime(frame["Created at"], errors="coerce")
+    frame["Initially assigned at"] = pd.to_datetime(
+        frame["Initially assigned at"], errors="coerce"
+    )
     frame["Solved at"] = pd.to_datetime(frame["Solved at"], errors="coerce")
+    frame["Replies"] = pd.to_numeric(frame["Replies"], errors="coerce").fillna(0)
     frame["First reply time in minutes"] = pd.to_numeric(
         frame["First reply time in minutes"], errors="coerce"
     )
@@ -139,6 +253,16 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     frame["Resolution elapsed hours"] = (
         frame["Solved at"] - frame["Created at"]
     ).dt.total_seconds() / 3600
+    frame["Resolution spreadsheet hours"] = (
+        frame["Full resolution time in minutes"] / 60
+    ).round(1)
+    frame["Response spreadsheet hours"] = [
+        first_reply_hours_like_spreadsheet(created_at, assigned_at)
+        for created_at, assigned_at in zip(
+            frame["Created at"], frame["Initially assigned at"]
+        )
+    ]
+    frame["Reason key"] = frame["Motivo do Contato [list]"].fillna("").str.strip()
     frame["Motivo do Contato [list]"] = (
         frame["Motivo do Contato [list]"]
         .replace({"-": "Não informado", "": "Não informado"})
@@ -157,9 +281,38 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
 
 
 def resolved_tickets(frame: pd.DataFrame) -> pd.DataFrame:
-    return frame[
+    solved = frame[
         frame["Solved at"].notna()
         & frame["Status"].fillna("").str.casefold().isin({"solved", "closed"})
+    ].copy()
+    # A planilha antiga usava Has Merged = No. A tag identifica esses registros.
+    merged = solved["Tags"].fillna("").str.contains(
+        r"(?:^|\s)closed_by_merge(?:\s|$)", case=False, regex=True
+    )
+    return solved[~merged].copy()
+
+
+def resolution_scope(frame: pd.DataFrame) -> pd.DataFrame:
+    """Amostra do KPI de resolução conforme o antigo Tickets_Resolvidos."""
+    excluded_reasons = {"encerramento", "sem resposta", "uso interno"}
+    reason = frame["Reason key"].str.casefold()
+    allowed_reason = reason.ne("") & ~reason.isin(excluded_reasons)
+    allowed_tag = ~frame["Tags"].fillna("").isin(TAGS_EXCLUIDAS_PLANILHA)
+    return frame[
+        allowed_reason
+        & allowed_tag
+        & frame["Resolution spreadsheet hours"].notna()
+    ].copy()
+
+
+def response_scope(frame: pd.DataFrame) -> pd.DataFrame:
+    """Amostra do KPI de resposta conforme o antigo Tickets_Respostas."""
+    reason = frame["Reason key"].str.casefold()
+    return frame[
+        reason.ne("")
+        & reason.ne("uso interno")
+        & frame["Replies"].gt(0)
+        & frame["Response spreadsheet hours"].notna()
     ].copy()
 
 
@@ -177,6 +330,17 @@ def metric_card(label: str, value: str, detail: str, tone: str = "blue") -> str:
 
 
 def performance_row(label: str, target: float, actual: float) -> str:
+    if pd.isna(actual):
+        return (
+            '<div class="performance-row">'
+            f'<div class="performance-name">{html.escape(label)}</div>'
+            f'<div><span class="cell-label">Objetivo</span><strong>{format_decimal(target)} h</strong></div>'
+            '<div><span class="cell-label">Realizado</span><strong>—</strong></div>'
+            '<div><span class="cell-label">Diferença</span><strong>—</strong></div>'
+            '<div><span class="cell-label">Variação</span><strong>—</strong></div>'
+            '<div><span class="status-pill neutral">Sem dados</span></div>'
+            '</div>'
+        )
     delta = actual - target
     variation = delta / target if target else 0
     achieved = actual <= target
@@ -192,6 +356,82 @@ def performance_row(label: str, target: float, actual: float) -> str:
         f'<div><span class="cell-label">Variação</span><strong>{sign}{format_percent(variation)}</strong></div>'
         f'<div><span class="status-pill {status_class}">{status_text}</span></div>'
         '</div>'
+    )
+
+
+def monthly_values(frame: pd.DataFrame, periods: list[pd.Period]) -> tuple[list[float], list[float]]:
+    resolution_values: list[float] = []
+    response_values: list[float] = []
+    for period in periods:
+        month_data = frame[frame["Solved at"].dt.to_period("M").eq(period)]
+        month_resolution = resolution_scope(month_data)
+        month_response = response_scope(month_data)
+        resolution_values.append(month_resolution["Resolution spreadsheet hours"].mean())
+        response_values.append(month_response["Response spreadsheet hours"].mean())
+    return resolution_values, response_values
+
+
+def monthly_table_section(label: str, target: float, actuals: list[float]) -> str:
+    def value_cells(values: list[float], formatter, css_class: str = "") -> str:
+        cells = []
+        for value in values:
+            shown = "—" if pd.isna(value) else formatter(value)
+            cells.append(f'<td class="{css_class}">{shown}</td>')
+        return "".join(cells)
+
+    deltas = [value - target if pd.notna(value) else float("nan") for value in actuals]
+    target_variations = [value / target - 1 if pd.notna(value) and target else float("nan") for value in actuals]
+    month_variations = [float("nan")]
+    for previous, current in zip(actuals, actuals[1:]):
+        month_variations.append(
+            current / previous - 1
+            if pd.notna(previous) and pd.notna(current) and previous
+            else float("nan")
+        )
+
+    target_values = [target] * len(actuals)
+    delta_cells = []
+    for value in deltas:
+        if pd.isna(value):
+            delta_cells.append('<td class="delta-neutral">—</td>')
+        else:
+            css_class = "delta-bad" if value > 0 else "delta-good"
+            sign = "+" if value > 0 else ""
+            delta_cells.append(
+                f'<td class="{css_class}">{sign}{format_decimal(value)}</td>'
+            )
+
+    return (
+        f'<tr class="kpi-objective"><th>(O) {html.escape(label)}</th>'
+        f'{value_cells(target_values, lambda value: format_decimal(value))}</tr>'
+        f'<tr class="kpi-actual"><th>(R) {html.escape(label)}</th>'
+        f'{value_cells(actuals, lambda value: format_decimal(value))}</tr>'
+        '<tr class="kpi-support"><th>MoM</th>'
+        f'{value_cells(month_variations, lambda value: ("+" if value > 0 else "") + format_percent(value))}</tr>'
+        '<tr class="kpi-delta"><th>Δ (O) (R)</th>'
+        f'{"".join(delta_cells)}</tr>'
+        '<tr class="kpi-support"><th>% (O) / (R)</th>'
+        f'{value_cells(target_variations, lambda value: ("+" if value > 0 else "") + format_percent(value))}</tr>'
+    )
+
+
+def monthly_table(frame: pd.DataFrame, periods: list[pd.Period]) -> str:
+    resolution_values, response_values = monthly_values(frame, periods)
+    year_label = str(periods[0].year) if len({period.year for period in periods}) == 1 else "Período"
+    header = "".join(
+        f"<th>{html.escape(MONTH_NAMES[period.month].lower())}<span>{period.year}</span></th>"
+        for period in periods
+    )
+    body = (
+        monthly_table_section("Tempo de Resolução", META_TEMPO_RESOLUCAO_H, resolution_values)
+        + '<tr class="kpi-spacer"><td colspan="99"></td></tr>'
+        + monthly_table_section("Tempo de Resposta", META_TEMPO_RESPOSTA_H, response_values)
+    )
+    return (
+        '<div class="monthly-table-wrap"><table class="monthly-table">'
+        f'<thead><tr><th>{year_label}</th>{header}</tr>'
+        f'<tr class="monthly-band"><th colspan="{len(periods) + 1}">SAC</th></tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
     )
 
 
@@ -338,6 +578,41 @@ st.markdown(
       .status-pill { display: inline-block; border-radius: 999px; padding: 7px 11px; font-size: 12px; font-weight: 750; text-align: center; }
       .status-pill.good { color: #087557; background: #DDF3EC; }
       .status-pill.bad { color: #B12D3D; background: #FBE5E8; }
+      .status-pill.neutral { color: #52606D; background: #EEF2F6; }
+
+      .monthly-table-wrap {
+        overflow-x: auto; background: white; border: 1px solid var(--line);
+        border-radius: 18px; box-shadow: 0 8px 26px rgba(23, 59, 94, .05);
+        margin-bottom: 14px;
+      }
+      .monthly-table { width: 100%; min-width: 860px; border-collapse: collapse; color: var(--text); }
+      .monthly-table th, .monthly-table td { padding: 8px 13px; text-align: right; white-space: nowrap; }
+      .monthly-table th:first-child, .monthly-table td:first-child { text-align: left; min-width: 215px; }
+      .monthly-table thead tr:first-child { background: var(--navy); color: white; }
+      .monthly-table thead tr:first-child th { font-size: 13px; font-weight: 750; }
+      .monthly-table thead span { display: block; font-size: 9px; opacity: .65; font-weight: 500; }
+      .monthly-band th { background: var(--blue); color: white; padding-top: 6px; padding-bottom: 6px; }
+      .monthly-table tbody th { font-size: 13px; font-weight: 720; color: var(--navy); }
+      .monthly-table tbody td { font-size: 13px; }
+      .monthly-table .kpi-actual { background: #EAF2FA; font-weight: 760; }
+      .monthly-table .kpi-objective { border-top: 1px dashed #9AA8B5; }
+      .monthly-table .kpi-support th, .monthly-table .kpi-support td { color: var(--muted); font-size: 12px; font-style: italic; }
+      .monthly-table .kpi-delta { font-weight: 760; }
+      .monthly-table .delta-good { color: var(--teal); }
+      .monthly-table .delta-bad { color: var(--red); }
+      .monthly-table .delta-neutral { color: var(--muted); }
+      .monthly-table .kpi-spacer td { height: 9px; padding: 0; }
+
+      .median-strip {
+        display: grid; grid-template-columns: auto 1fr 1fr; align-items: center; gap: 16px;
+        background: rgba(255,255,255,.72); border: 1px solid var(--line); border-radius: 14px;
+        padding: 12px 16px; margin: 0 0 28px;
+      }
+      .median-intro strong { display: block; color: var(--navy); font-size: 13px; }
+      .median-intro span { color: var(--muted); font-size: 10px; }
+      .median-item { border-left: 1px solid var(--line); padding-left: 16px; }
+      .median-item span { display: block; color: var(--muted); font-size: 10px; }
+      .median-item strong { color: var(--navy); font-size: 17px; }
 
       .info-card {
         background: white;
@@ -396,6 +671,9 @@ st.markdown(
         .metric-grid { grid-template-columns: 1fr; }
         .agent-grid { grid-template-columns: 1fr; }
         .mini-grid { grid-template-columns: 1fr; }
+        .median-strip { grid-template-columns: 1fr 1fr; }
+        .median-intro { grid-column: 1 / -1; }
+        .median-item:first-of-type { border-left: 0; padding-left: 0; }
       }
     </style>
     """,
@@ -410,6 +688,7 @@ if source is None:
 
 try:
     raw = read_zip(source, source_signature)
+    duplicates_removed = int(raw.attrs.get("duplicates_removed", 0))
     solved_all = resolved_tickets(raw)
 except Exception as error:
     st.error("Não foi possível ler a ZIP do Zendesk.")
@@ -425,7 +704,9 @@ MONTH_NAMES = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
-month_counts = solved_all["Solved at"].dropna().dt.to_period("M").value_counts()
+month_counts = (
+    resolution_scope(solved_all)["Solved at"].dropna().dt.to_period("M").value_counts()
+)
 # Descarta meses residuais de tickets históricos. Mantém meses com ao menos 5%
 # do volume do principal mês (e no mínimo 5 tickets).
 relevant_month_minimum = max(5, int(month_counts.max() * .05))
@@ -502,6 +783,13 @@ if solved.empty:
     st.warning("Nenhum ticket resolvido corresponde aos filtros selecionados.")
     st.stop()
 
+# Cada KPI usa exatamente a amostra equivalente ao respectivo pivô antigo.
+resolution_solved = resolution_scope(solved)
+response_solved = response_scope(solved)
+if resolution_solved.empty:
+    st.warning("Não há tickets elegíveis para o cálculo de resolução neste período.")
+    st.stop()
+
 if source_updated_at:
     updated_stamp = pd.Timestamp(source_updated_at)
     if updated_stamp.tzinfo is None:
@@ -511,19 +799,32 @@ if source_updated_at:
 else:
     updated_text = "não disponível"
 
-# Indicadores: somente tickets resolvidos no período filtrado.
-response_hours = solved["First reply time in minutes"].median() / 60
-resolution_hours = solved["Resolution elapsed hours"].median()
-satisfaction = solved["Satisfaction Score"].fillna("Not Offered")
-good_count = int(satisfaction.eq("Good").sum())
-bad_count = int(satisfaction.eq("Bad").sum())
-offered_count = int(satisfaction.eq("Offered").sum())
+# Indicadores principais: média e regras da planilha histórica.
+response_hours = response_solved["Response spreadsheet hours"].mean()
+resolution_hours = resolution_solved["Resolution spreadsheet hours"].mean()
+response_median = response_solved["Response spreadsheet hours"].median()
+resolution_median = resolution_solved["Resolution spreadsheet hours"].median()
+
+# CSAT: Good / (Good + Bad). Offered entra somente na taxa de resposta.
+satisfaction = solved["Satisfaction Score"].fillna("").str.strip().str.casefold()
+good_count = int(satisfaction.eq("good").sum())
+bad_count = int(satisfaction.eq("bad").sum())
+offered_count = int(satisfaction.eq("offered").sum())
 rated_count = good_count + bad_count
 surveyed_count = rated_count + offered_count
 csat_rate = good_count / rated_count if rated_count else float("nan")
 survey_response_rate = rated_count / surveyed_count if surveyed_count else float("nan")
-response_status = "Dentro da meta" if response_hours <= META_TEMPO_RESPOSTA_H else "Acima da meta"
+response_status = (
+    "Sem dados"
+    if pd.isna(response_hours)
+    else "Dentro da meta" if response_hours <= META_TEMPO_RESPOSTA_H else "Acima da meta"
+)
 resolution_status = "Dentro da meta" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "Acima da meta"
+response_tone = (
+    "blue"
+    if pd.isna(response_hours)
+    else "teal" if response_hours <= META_TEMPO_RESPOSTA_H else "red"
+)
 
 st.markdown(
     '<div class="hero">'
@@ -536,10 +837,10 @@ st.markdown(
 )
 
 cards = "".join([
-    metric_card("Tempo de resposta", f"{format_decimal(response_hours)} h", f"Meta: {format_decimal(META_TEMPO_RESPOSTA_H)} h • {response_status}", "teal" if response_hours <= META_TEMPO_RESPOSTA_H else "red"),
-    metric_card("Tempo de resolução", f"{format_decimal(resolution_hours)} h", f"Horas corridas • Meta: {format_decimal(META_TEMPO_RESOLUCAO_H)} h", "teal" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "red"),
+    metric_card("Tempo médio de resposta", f"{format_decimal(response_hours)} h", f"Planilha histórica • {format_number(len(response_solved))} tickets • {response_status}", response_tone),
+    metric_card("Tempo médio de resolução", f"{format_decimal(resolution_hours)} h", f"Horas corridas • {format_number(len(resolution_solved))} tickets", "teal" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "red"),
     metric_card("CSAT", format_percent(csat_rate), f"{format_number(rated_count)} avaliações respondidas", "blue"),
-    metric_card("Tickets resolvidos", format_number(len(solved)), f"De {selected_start.strftime('%d/%m')} a {selected_end.strftime('%d/%m')}", "gold"),
+    metric_card("Tickets resolvidos", format_number(len(resolution_solved)), f"IDs únicos • de {selected_start.strftime('%d/%m')} a {selected_end.strftime('%d/%m')}", "gold"),
 ])
 st.markdown(f'<div class="metric-grid">{cards}</div>', unsafe_allow_html=True)
 
@@ -547,34 +848,72 @@ st.markdown('<div class="section-heading"><div class="section-title">Meta x real
 performance_html = performance_row("Tempo de resposta", META_TEMPO_RESPOSTA_H, response_hours) + performance_row("Tempo de resolução (horas corridas)", META_TEMPO_RESOLUCAO_H, resolution_hours)
 st.markdown(f'<div class="performance-table">{performance_html}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="section-heading"><div class="section-title">Tempo de resolução por motivo</div><div class="section-caption">Mediana em horas corridas, somente para tickets resolvidos.</div></div>', unsafe_allow_html=True)
-resolution_reason = (
-    solved.groupby("Motivo do Contato [list]", as_index=False)
-    .agg(**{"Tempo mediano (h)": ("Resolution elapsed hours", "median"), "Tickets": ("Id", "count")})
-    .dropna(subset=["Tempo mediano (h)"])
+if period_mode in {"Mês", "Ano inteiro"}:
+    history_start = pd.Timestamp(selected_start).replace(month=1, day=1)
+else:
+    history_start = pd.Timestamp(selected_start)
+history_end = min(pd.Timestamp(selected_end), solved_all["Solved at"].max())
+history_periods = list(pd.period_range(history_start, history_end, freq="M"))
+history_source = solved_all.copy()
+if selected_agents:
+    history_source = history_source[history_source["Assignee"].isin(selected_agents)].copy()
+if period_mode == "Período personalizado":
+    history_source = history_source[
+        history_source["Solved at"].ge(start_datetime)
+        & history_source["Solved at"].lt(end_datetime)
+    ].copy()
+
+if history_periods:
+    st.markdown('<div class="section-heading"><div class="section-title">Tempos de resposta e resolução — mês vs mês</div><div class="section-caption">Mesmo formato da planilha anterior. (O) é objetivo, (R) é realizado e os valores são médias.</div></div>', unsafe_allow_html=True)
+    st.markdown(monthly_table(history_source, history_periods), unsafe_allow_html=True)
+
+st.markdown(
+    '<div class="median-strip">'
+    '<div class="median-intro"><strong>Mediana, para contexto</strong><span>Leitura complementar; não substitui o indicador histórico.</span></div>'
+    f'<div class="median-item"><span>Tempo de resposta</span><strong>{format_decimal(response_median)} h</strong></div>'
+    f'<div class="median-item"><span>Tempo de resolução</span><strong>{format_decimal(resolution_median)} h</strong></div>'
+    '</div>',
+    unsafe_allow_html=True,
 )
-resolution_reason = resolution_reason.nlargest(12, "Tickets").sort_values("Tempo mediano (h)")
+
+st.markdown('<div class="section-heading"><div class="section-title">Tempo médio de resolução por motivo</div><div class="section-caption">Horas corridas e mesma amostra do indicador histórico. A mediana aparece ao passar o mouse.</div></div>', unsafe_allow_html=True)
+resolution_reason = (
+    resolution_solved.groupby("Motivo do Contato [list]", as_index=False)
+    .agg(
+        **{
+            "Tempo médio (h)": ("Resolution spreadsheet hours", "mean"),
+            "Mediana (h)": ("Resolution spreadsheet hours", "median"),
+            "Tickets": ("Id", "count"),
+        }
+    )
+    .dropna(subset=["Tempo médio (h)"])
+)
+resolution_reason = resolution_reason.nlargest(12, "Tickets").sort_values("Tempo médio (h)")
 resolution_reason_figure = px.bar(
-    resolution_reason, x="Tempo mediano (h)", y="Motivo do Contato [list]", orientation="h",
-    text="Tempo mediano (h)", hover_data={"Tickets": True, "Tempo mediano (h)": ":.1f"},
-    color="Tempo mediano (h)", color_continuous_scale=[[0, "#CFE8E0"], [1, COLORS["navy"]]],
+    resolution_reason, x="Tempo médio (h)", y="Motivo do Contato [list]", orientation="h",
+    text="Tempo médio (h)", hover_data={"Tickets": True, "Tempo médio (h)": ":.1f", "Mediana (h)": ":.1f"},
+    color="Tempo médio (h)", color_continuous_scale=[[0, "#CFE8E0"], [1, COLORS["navy"]]],
 )
 resolution_reason_figure.update_traces(texttemplate="%{text:.1f} h", textposition="outside", cliponaxis=False)
 resolution_reason_figure.update_layout(height=430, margin=dict(l=10, r=65, t=10, b=35), xaxis_title="Horas corridas", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
 st.plotly_chart(finish_figure(resolution_reason_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
-st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume, velocidade e satisfação de cada responsável.</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume e tempos médios pela metodologia histórica, além do CSAT de cada responsável.</div></div>', unsafe_allow_html=True)
 agent_rows = []
 for agent_name, agent_data in solved.groupby("Assignee"):
-    agent_satisfaction = agent_data["Satisfaction Score"]
-    agent_good = int(agent_satisfaction.eq("Good").sum())
-    agent_bad = int(agent_satisfaction.eq("Bad").sum())
+    agent_resolution = resolution_scope(agent_data)
+    agent_response = response_scope(agent_data)
+    if agent_resolution.empty:
+        continue
+    agent_satisfaction = agent_data["Satisfaction Score"].fillna("").str.strip().str.casefold()
+    agent_good = int(agent_satisfaction.eq("good").sum())
+    agent_bad = int(agent_satisfaction.eq("bad").sum())
     agent_rated = agent_good + agent_bad
     agent_rows.append({
         "Agente": agent_name,
-        "Tickets resolvidos": len(agent_data),
-        "Resposta mediana (h)": agent_data["First reply time in minutes"].median() / 60,
-        "Resolução mediana (h)": agent_data["Resolution elapsed hours"].median(),
+        "Tickets resolvidos": len(agent_resolution),
+        "Resposta média (h)": agent_response["Response spreadsheet hours"].mean(),
+        "Resolução média (h)": agent_resolution["Resolution spreadsheet hours"].mean(),
         "Avaliações": agent_rated,
         "CSAT": agent_good / agent_rated if agent_rated else float("nan"),
     })
@@ -593,8 +932,8 @@ for _, agent in agent_summary.iterrows():
         '<div class="agent-volume-label">resolvidos</div>'
         '</div></div>'
         '<div class="agent-stats">'
-        f'<div class="agent-stat"><strong>{format_decimal(agent["Resposta mediana (h)"])} h</strong><span>Resposta mediana</span></div>'
-        f'<div class="agent-stat"><strong>{format_decimal(agent["Resolução mediana (h)"])} h</strong><span>Resolução mediana</span></div>'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resposta média (h)"])} h</strong><span>Resposta média</span></div>'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resolução média (h)"])} h</strong><span>Resolução média</span></div>'
         f'<div class="agent-stat {csat_class}"><strong>{csat_text}</strong><span>CSAT · {format_number(agent["Avaliações"])} avaliações</span></div>'
         '</div></div>'
     )
@@ -655,7 +994,9 @@ with chart_right:
     st.plotly_chart(finish_figure(csat_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
 bad_reasons = (
-    solved[solved["Satisfaction Score"].eq("Bad")]["Motivo do Contato [list]"]
+    solved[
+        solved["Satisfaction Score"].fillna("").str.strip().str.casefold().eq("bad")
+    ]["Motivo do Contato [list]"]
     .value_counts().rename_axis("Motivo").reset_index(name="Avaliações ruins").sort_values("Avaliações ruins")
 )
 chart_left, chart_right = st.columns(2, gap="large")
@@ -678,11 +1019,22 @@ with chart_right:
         st.plotly_chart(finish_figure(bad_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
 st.markdown('<div class="section-heading"><div class="section-title">Tickets resolvidos por motivo</div><div class="section-caption">Principais motivos no período, excluindo Uso Interno.</div></div>', unsafe_allow_html=True)
-external_solved = solved[~solved["Motivo do Contato [list]"].str.contains("uso interno", case=False, na=False)]
+external_solved = resolution_solved[
+    ~resolution_solved["Motivo do Contato [list]"].str.contains("uso interno", case=False, na=False)
+]
 reason_counts = external_solved["Motivo do Contato [list]"].value_counts().rename_axis("Motivo").reset_index(name="Tickets").head(12).sort_values("Tickets")
 reason_figure = px.bar(reason_counts, x="Tickets", y="Motivo", orientation="h", text_auto=True, color="Tickets", color_continuous_scale=[[0, "#CFE2F5"], [1, COLORS["navy"]]])
 reason_figure.update_traces(textposition="outside", cliponaxis=False)
 reason_figure.update_layout(height=430, margin=dict(l=10, r=55, t=15, b=35), xaxis_title="Tickets resolvidos", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
 st.plotly_chart(finish_figure(reason_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
-st.markdown(f'<div class="source-note">Fonte: {html.escape(source_name)} • atualização no GitHub: {html.escape(updated_text)} • {format_number(len(solved))} tickets resolvidos após os filtros</div>', unsafe_allow_html=True)
+duplicate_note = (
+    f"{format_number(duplicates_removed)} duplicado(s) removido(s) automaticamente"
+    if duplicates_removed
+    else "nenhum ID duplicado encontrado"
+)
+st.markdown(
+    f'<div class="source-note">Fonte: {html.escape(source_name)} • atualização no GitHub: {html.escape(updated_text)} • '
+    f'{html.escape(duplicate_note)} • {format_number(len(resolution_solved))} tickets no KPI de resolução</div>',
+    unsafe_allow_html=True,
+)
