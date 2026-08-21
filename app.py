@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import html
 import subprocess
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -88,11 +89,10 @@ REQUIRED_COLUMNS = {
     "Status",
     "Via",
     "Created at",
+    "Initially assigned at",
     "Solved at",
     "Replies",
     "Satisfaction Score",
-    "First reply time in minutes",
-    "First reply time in minutes within business hours",
     "Full resolution time in minutes",
     "Full resolution time in minutes within business hours",
     "Motivo do Contato [list]",
@@ -158,6 +158,20 @@ TAGS_EXCLUIDAS_PLANILHA = {
     "feedback returning_visitor",
 }
 
+# Mesma agenda de feriados usada pelo cálculo First Reply BH da planilha.
+FERIADOS_SAC = np.array(
+    [
+        "2025-01-01", "2025-02-24", "2025-02-25", "2025-04-21",
+        "2025-05-01", "2025-06-19", "2025-09-07", "2025-09-08",
+        "2025-10-12", "2025-11-02", "2025-11-15", "2025-11-20",
+        "2025-12-25", "2026-01-01", "2026-02-16", "2026-02-17",
+        "2026-04-03", "2026-04-21", "2026-05-01", "2026-06-04",
+        "2026-09-07", "2026-09-08", "2026-10-12", "2026-11-02",
+        "2026-11-15", "2026-11-20", "2026-12-25",
+    ],
+    dtype="datetime64[D]",
+)
+
 def format_number(value: float | int) -> str:
     return f"{value:,.0f}".replace(",", ".")
 
@@ -179,6 +193,62 @@ def find_zip() -> Path | None:
     return files[0] if files else None
 
 
+def first_assignment_business_hours(created_at: pd.Timestamp, assigned_at: pd.Timestamp) -> float:
+    """Replica First Reply BH: criação até primeira atribuição, de 9h às 18h."""
+    if pd.isna(created_at) or pd.isna(assigned_at):
+        return float("nan")
+
+    start = pd.Timestamp(created_at)
+    end = pd.Timestamp(assigned_at)
+    direction = 1
+    if end < start:
+        start, end = end, start
+        direction = -1
+
+    start_day = np.datetime64(start.date(), "D")
+    end_day = np.datetime64(end.date(), "D")
+    business_days = np.busday_count(
+        start_day,
+        end_day + np.timedelta64(1, "D"),
+        weekmask="1111100",
+        holidays=FERIADOS_SAC,
+    )
+    start_hour = (start - start.normalize()).total_seconds() / 3600
+    end_hour = (end - end.normalize()).total_seconds() / 3600
+    elapsed = (
+        (business_days - 2) * 9
+        + (18 - max(start_hour, 9))
+        + (min(end_hour, 18) - 9)
+    )
+    return round(direction * elapsed, 1)
+
+
+def first_assignment_weekday_hours(created_at: pd.Timestamp, assigned_at: pd.Timestamp) -> float:
+    """Replica First Reply H, preservando o comparativo e a mediana usados antes."""
+    if pd.isna(created_at) or pd.isna(assigned_at):
+        return float("nan")
+
+    start = pd.Timestamp(created_at)
+    end = pd.Timestamp(assigned_at)
+    direction = 1
+    if end < start:
+        start, end = end, start
+        direction = -1
+
+    start_day = np.datetime64(start.date(), "D")
+    end_day = np.datetime64(end.date(), "D")
+    business_days = np.busday_count(
+        start_day,
+        end_day + np.timedelta64(1, "D"),
+        weekmask="1111100",
+        holidays=FERIADOS_SAC,
+    )
+    start_hour = (start - start.normalize()).total_seconds() / 3600
+    end_hour = (end - end.normalize()).total_seconds() / 3600
+    elapsed = (business_days - 1) * 24 + end_hour - start_hour
+    return round(direction * elapsed, 1)
+
+
 @st.cache_data(show_spinner="Lendo a base detalhada do Zendesk...")
 def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     del signature
@@ -197,11 +267,12 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     frame.attrs["duplicates_removed"] = original_rows - len(frame)
 
     frame["Created at"] = pd.to_datetime(frame["Created at"], errors="coerce")
+    frame["Initially assigned at"] = pd.to_datetime(
+        frame["Initially assigned at"], errors="coerce"
+    )
     frame["Solved at"] = pd.to_datetime(frame["Solved at"], errors="coerce")
     frame["Replies"] = pd.to_numeric(frame["Replies"], errors="coerce").fillna(0)
     numeric_time_columns = [
-        "First reply time in minutes",
-        "First reply time in minutes within business hours",
         "Full resolution time in minutes",
         "Full resolution time in minutes within business hours",
     ]
@@ -217,10 +288,18 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     frame["Resolution business hours"] = (
         frame["Full resolution time in minutes within business hours"] / 60
     )
-    frame["Response calendar hours"] = frame["First reply time in minutes"] / 60
-    frame["Response business hours"] = (
-        frame["First reply time in minutes within business hours"] / 60
-    )
+    frame["Response weekday hours"] = [
+        first_assignment_weekday_hours(created_at, assigned_at)
+        for created_at, assigned_at in zip(
+            frame["Created at"], frame["Initially assigned at"]
+        )
+    ]
+    frame["Response business hours"] = [
+        first_assignment_business_hours(created_at, assigned_at)
+        for created_at, assigned_at in zip(
+            frame["Created at"], frame["Initially assigned at"]
+        )
+    ]
     frame["Reason key"] = frame["Motivo do Contato [list]"].fillna("").str.strip()
     frame["Motivo do Contato [list]"] = (
         frame["Motivo do Contato [list]"]
@@ -761,8 +840,10 @@ else:
 # Indicadores principais: resposta em horas úteis e resolução em horas corridas.
 response_hours = response_solved["Response business hours"].mean()
 resolution_hours = resolution_solved["Resolution calendar hours"].mean()
+response_median = response_solved["Response weekday hours"].median()
+resolution_median = resolution_solved["Resolution calendar hours"].median()
 # Leitura complementar com a base de tempo oposta.
-response_calendar_hours = response_solved["Response calendar hours"].mean()
+response_calendar_hours = response_solved["Response weekday hours"].mean()
 resolution_business_hours = resolution_solved["Resolution business hours"].mean()
 
 # CSAT: Good / (Good + Bad). Offered entra somente na taxa de resposta.
@@ -804,7 +885,7 @@ cards = "".join([
 ])
 st.markdown(f'<div class="metric-grid">{cards}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="section-heading"><div class="section-title">Meta x realizado</div><div class="section-caption">Resposta em horas úteis e resolução em horas corridas. Quanto menor o tempo, melhor.</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading"><div class="section-title">Meta x realizado</div><div class="section-caption">Resposta: criação até a primeira atribuição, na agenda 9h–18h. Resolução: horas corridas. Quanto menor, melhor.</div></div>', unsafe_allow_html=True)
 performance_html = performance_row("Tempo de resposta (horas úteis)", META_TEMPO_RESPOSTA_H, response_hours) + performance_row("Tempo de resolução (horas corridas)", META_TEMPO_RESOLUCAO_H, resolution_hours)
 st.markdown(f'<div class="performance-table">{performance_html}</div>', unsafe_allow_html=True)
 
@@ -830,8 +911,17 @@ if history_periods:
 st.markdown(
     '<div class="comparison-strip">'
     '<div class="comparison-intro"><strong>Base de tempo complementar</strong><span>Os mesmos indicadores observados pela base de tempo oposta.</span></div>'
-    f'<div class="comparison-item"><span>Resposta em horas corridas</span><strong>{format_decimal(response_calendar_hours)} h</strong></div>'
+    f'<div class="comparison-item"><span>Resposta em horas corridas · criação → 1ª atribuição</span><strong>{format_decimal(response_calendar_hours)} h</strong></div>'
     f'<div class="comparison-item"><span>Resolução em horas úteis</span><strong>{format_decimal(resolution_business_hours)} h</strong></div>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    '<div class="comparison-strip">'
+    '<div class="comparison-intro"><strong>Mediana, para contexto</strong><span>Mesmas bases dos indicadores principais.</span></div>'
+    f'<div class="comparison-item"><span>Tempo de resposta · horas úteis</span><strong>{format_decimal(response_median)} h</strong></div>'
+    f'<div class="comparison-item"><span>Tempo de resolução · horas corridas</span><strong>{format_decimal(resolution_median)} h</strong></div>'
     '</div>',
     unsafe_allow_html=True,
 )
