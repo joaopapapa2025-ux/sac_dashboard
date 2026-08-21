@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import html
 import subprocess
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -89,12 +88,13 @@ REQUIRED_COLUMNS = {
     "Status",
     "Via",
     "Created at",
-    "Initially assigned at",
     "Solved at",
     "Replies",
     "Satisfaction Score",
     "First reply time in minutes",
+    "First reply time in minutes within business hours",
     "Full resolution time in minutes",
+    "Full resolution time in minutes within business hours",
     "Motivo do Contato [list]",
 }
 
@@ -158,21 +158,6 @@ TAGS_EXCLUIDAS_PLANILHA = {
     "feedback returning_visitor",
 }
 
-# Feriados utilizados pela fórmula NETWORKDAYS da planilha original.
-FERIADOS_PLANILHA = np.array(
-    [
-        "2025-01-01", "2025-02-24", "2025-02-25", "2025-04-21",
-        "2025-05-01", "2025-06-19", "2025-09-07", "2025-09-08",
-        "2025-10-12", "2025-11-02", "2025-11-15", "2025-11-20",
-        "2025-12-25", "2026-01-01", "2026-02-16", "2026-02-17",
-        "2026-04-03", "2026-04-21", "2026-05-01", "2026-06-04",
-        "2026-09-07", "2026-09-08", "2026-10-12", "2026-11-02",
-        "2026-11-15", "2026-11-20", "2026-12-25",
-    ],
-    dtype="datetime64[D]",
-)
-
-
 def format_number(value: float | int) -> str:
     return f"{value:,.0f}".replace(",", ".")
 
@@ -194,32 +179,6 @@ def find_zip() -> Path | None:
     return files[0] if files else None
 
 
-def first_reply_hours_like_spreadsheet(created_at: pd.Timestamp, assigned_at: pd.Timestamp) -> float:
-    """Replica o First Reply H: criação até primeira atribuição, sem fins de semana/feriados."""
-    if pd.isna(created_at) or pd.isna(assigned_at):
-        return float("nan")
-
-    start = pd.Timestamp(created_at)
-    end = pd.Timestamp(assigned_at)
-    direction = 1
-    if end < start:
-        start, end = end, start
-        direction = -1
-
-    start_day = np.datetime64(start.date(), "D")
-    end_day = np.datetime64(end.date(), "D")
-    business_days = np.busday_count(
-        start_day,
-        end_day + np.timedelta64(1, "D"),
-        weekmask="1111100",
-        holidays=FERIADOS_PLANILHA,
-    )
-    start_hour = (start - start.normalize()).total_seconds() / 3600
-    end_hour = (end - end.normalize()).total_seconds() / 3600
-    elapsed = (business_days - 1) * 24 + end_hour - start_hour
-    return round(direction * elapsed, 1)
-
-
 @st.cache_data(show_spinner="Lendo a base detalhada do Zendesk...")
 def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     del signature
@@ -238,30 +197,30 @@ def read_zip(source: str | bytes, signature: float | int) -> pd.DataFrame:
     frame.attrs["duplicates_removed"] = original_rows - len(frame)
 
     frame["Created at"] = pd.to_datetime(frame["Created at"], errors="coerce")
-    frame["Initially assigned at"] = pd.to_datetime(
-        frame["Initially assigned at"], errors="coerce"
-    )
     frame["Solved at"] = pd.to_datetime(frame["Solved at"], errors="coerce")
     frame["Replies"] = pd.to_numeric(frame["Replies"], errors="coerce").fillna(0)
-    frame["First reply time in minutes"] = pd.to_numeric(
-        frame["First reply time in minutes"], errors="coerce"
-    )
-    frame["Full resolution time in minutes"] = pd.to_numeric(
-        frame["Full resolution time in minutes"], errors="coerce"
-    )
+    numeric_time_columns = [
+        "First reply time in minutes",
+        "First reply time in minutes within business hours",
+        "Full resolution time in minutes",
+        "Full resolution time in minutes within business hours",
+    ]
+    for column in numeric_time_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     # Horas corridas: diferença real entre criação e solução, sem calendário comercial.
     frame["Resolution elapsed hours"] = (
         frame["Solved at"] - frame["Created at"]
     ).dt.total_seconds() / 3600
-    frame["Resolution spreadsheet hours"] = (
+    frame["Resolution calendar hours"] = (
         frame["Full resolution time in minutes"] / 60
     ).round(1)
-    frame["Response spreadsheet hours"] = [
-        first_reply_hours_like_spreadsheet(created_at, assigned_at)
-        for created_at, assigned_at in zip(
-            frame["Created at"], frame["Initially assigned at"]
-        )
-    ]
+    frame["Resolution business hours"] = (
+        frame["Full resolution time in minutes within business hours"] / 60
+    )
+    frame["Response calendar hours"] = frame["First reply time in minutes"] / 60
+    frame["Response business hours"] = (
+        frame["First reply time in minutes within business hours"] / 60
+    )
     frame["Reason key"] = frame["Motivo do Contato [list]"].fillna("").str.strip()
     frame["Motivo do Contato [list]"] = (
         frame["Motivo do Contato [list]"]
@@ -301,7 +260,7 @@ def resolution_scope(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[
         allowed_reason
         & allowed_tag
-        & frame["Resolution spreadsheet hours"].notna()
+        & frame["Resolution calendar hours"].notna()
     ].copy()
 
 
@@ -312,7 +271,7 @@ def response_scope(frame: pd.DataFrame) -> pd.DataFrame:
         reason.ne("")
         & reason.ne("uso interno")
         & frame["Replies"].gt(0)
-        & frame["Response spreadsheet hours"].notna()
+        & frame["Response business hours"].notna()
     ].copy()
 
 
@@ -366,8 +325,8 @@ def monthly_values(frame: pd.DataFrame, periods: list[pd.Period]) -> tuple[list[
         month_data = frame[frame["Solved at"].dt.to_period("M").eq(period)]
         month_resolution = resolution_scope(month_data)
         month_response = response_scope(month_data)
-        resolution_values.append(month_resolution["Resolution spreadsheet hours"].mean())
-        response_values.append(month_response["Response spreadsheet hours"].mean())
+        resolution_values.append(month_resolution["Resolution calendar hours"].mean())
+        response_values.append(month_response["Response business hours"].mean())
     return resolution_values, response_values
 
 
@@ -423,9 +382,9 @@ def monthly_table(frame: pd.DataFrame, periods: list[pd.Period]) -> str:
         for period in periods
     )
     body = (
-        monthly_table_section("Tempo de Resolução", META_TEMPO_RESOLUCAO_H, resolution_values)
+        monthly_table_section("Tempo de Resolução · horas corridas", META_TEMPO_RESOLUCAO_H, resolution_values)
         + '<tr class="kpi-spacer"><td colspan="99"></td></tr>'
-        + monthly_table_section("Tempo de Resposta", META_TEMPO_RESPOSTA_H, response_values)
+        + monthly_table_section("Tempo de Resposta · horas úteis", META_TEMPO_RESPOSTA_H, response_values)
     )
     return (
         '<div class="monthly-table-wrap"><table class="monthly-table">'
@@ -603,16 +562,16 @@ st.markdown(
       .monthly-table .delta-neutral { color: var(--muted); }
       .monthly-table .kpi-spacer td { height: 9px; padding: 0; }
 
-      .median-strip {
+      .comparison-strip {
         display: grid; grid-template-columns: auto 1fr 1fr; align-items: center; gap: 16px;
         background: rgba(255,255,255,.72); border: 1px solid var(--line); border-radius: 14px;
         padding: 12px 16px; margin: 0 0 28px;
       }
-      .median-intro strong { display: block; color: var(--navy); font-size: 13px; }
-      .median-intro span { color: var(--muted); font-size: 10px; }
-      .median-item { border-left: 1px solid var(--line); padding-left: 16px; }
-      .median-item span { display: block; color: var(--muted); font-size: 10px; }
-      .median-item strong { color: var(--navy); font-size: 17px; }
+      .comparison-intro strong { display: block; color: var(--navy); font-size: 13px; }
+      .comparison-intro span { color: var(--muted); font-size: 10px; }
+      .comparison-item { border-left: 1px solid var(--line); padding-left: 16px; }
+      .comparison-item span { display: block; color: var(--muted); font-size: 10px; }
+      .comparison-item strong { color: var(--navy); font-size: 17px; }
 
       .info-card {
         background: white;
@@ -671,9 +630,9 @@ st.markdown(
         .metric-grid { grid-template-columns: 1fr; }
         .agent-grid { grid-template-columns: 1fr; }
         .mini-grid { grid-template-columns: 1fr; }
-        .median-strip { grid-template-columns: 1fr 1fr; }
-        .median-intro { grid-column: 1 / -1; }
-        .median-item:first-of-type { border-left: 0; padding-left: 0; }
+        .comparison-strip { grid-template-columns: 1fr 1fr; }
+        .comparison-intro { grid-column: 1 / -1; }
+        .comparison-item:first-of-type { border-left: 0; padding-left: 0; }
       }
     </style>
     """,
@@ -799,11 +758,12 @@ if source_updated_at:
 else:
     updated_text = "não disponível"
 
-# Indicadores principais: média e regras da planilha histórica.
-response_hours = response_solved["Response spreadsheet hours"].mean()
-resolution_hours = resolution_solved["Resolution spreadsheet hours"].mean()
-response_median = response_solved["Response spreadsheet hours"].median()
-resolution_median = resolution_solved["Resolution spreadsheet hours"].median()
+# Indicadores principais: resposta em horas úteis e resolução em horas corridas.
+response_hours = response_solved["Response business hours"].mean()
+resolution_hours = resolution_solved["Resolution calendar hours"].mean()
+# Leitura complementar com a base de tempo oposta.
+response_calendar_hours = response_solved["Response calendar hours"].mean()
+resolution_business_hours = resolution_solved["Resolution business hours"].mean()
 
 # CSAT: Good / (Good + Bad). Offered entra somente na taxa de resposta.
 satisfaction = solved["Satisfaction Score"].fillna("").str.strip().str.casefold()
@@ -837,15 +797,15 @@ st.markdown(
 )
 
 cards = "".join([
-    metric_card("Tempo médio de resposta", f"{format_decimal(response_hours)} h", f"Planilha histórica • {format_number(len(response_solved))} tickets • {response_status}", response_tone),
+    metric_card("Tempo médio de resposta", f"{format_decimal(response_hours)} h", f"Horas úteis • {format_number(len(response_solved))} tickets • {response_status}", response_tone),
     metric_card("Tempo médio de resolução", f"{format_decimal(resolution_hours)} h", f"Horas corridas • {format_number(len(resolution_solved))} tickets", "teal" if resolution_hours <= META_TEMPO_RESOLUCAO_H else "red"),
     metric_card("CSAT", format_percent(csat_rate), f"{format_number(rated_count)} avaliações respondidas", "blue"),
     metric_card("Tickets resolvidos", format_number(len(resolution_solved)), f"IDs únicos • de {selected_start.strftime('%d/%m')} a {selected_end.strftime('%d/%m')}", "gold"),
 ])
 st.markdown(f'<div class="metric-grid">{cards}</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="section-heading"><div class="section-title">Meta x realizado</div><div class="section-caption">Quanto menor o tempo, melhor o resultado.</div></div>', unsafe_allow_html=True)
-performance_html = performance_row("Tempo de resposta", META_TEMPO_RESPOSTA_H, response_hours) + performance_row("Tempo de resolução (horas corridas)", META_TEMPO_RESOLUCAO_H, resolution_hours)
+st.markdown('<div class="section-heading"><div class="section-title">Meta x realizado</div><div class="section-caption">Resposta em horas úteis e resolução em horas corridas. Quanto menor o tempo, melhor.</div></div>', unsafe_allow_html=True)
+performance_html = performance_row("Tempo de resposta (horas úteis)", META_TEMPO_RESPOSTA_H, response_hours) + performance_row("Tempo de resolução (horas corridas)", META_TEMPO_RESOLUCAO_H, resolution_hours)
 st.markdown(f'<div class="performance-table">{performance_html}</div>', unsafe_allow_html=True)
 
 if period_mode in {"Mês", "Ano inteiro"}:
@@ -864,25 +824,25 @@ if period_mode == "Período personalizado":
     ].copy()
 
 if history_periods:
-    st.markdown('<div class="section-heading"><div class="section-title">Tempos de resposta e resolução — mês vs mês</div><div class="section-caption">Mesmo formato da planilha anterior. (O) é objetivo, (R) é realizado e os valores são médias.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-heading"><div class="section-title">Tempos de resposta e resolução — mês vs mês</div><div class="section-caption">Resposta em horas úteis; resolução em horas corridas. (O) é objetivo, (R) é realizado e os valores são médias.</div></div>', unsafe_allow_html=True)
     st.markdown(monthly_table(history_source, history_periods), unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="median-strip">'
-    '<div class="median-intro"><strong>Mediana, para contexto</strong><span>Leitura complementar; não substitui o indicador histórico.</span></div>'
-    f'<div class="median-item"><span>Tempo de resposta</span><strong>{format_decimal(response_median)} h</strong></div>'
-    f'<div class="median-item"><span>Tempo de resolução</span><strong>{format_decimal(resolution_median)} h</strong></div>'
+    '<div class="comparison-strip">'
+    '<div class="comparison-intro"><strong>Base de tempo complementar</strong><span>Os mesmos indicadores observados pela base de tempo oposta.</span></div>'
+    f'<div class="comparison-item"><span>Resposta em horas corridas</span><strong>{format_decimal(response_calendar_hours)} h</strong></div>'
+    f'<div class="comparison-item"><span>Resolução em horas úteis</span><strong>{format_decimal(resolution_business_hours)} h</strong></div>'
     '</div>',
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="section-heading"><div class="section-title">Tempo médio de resolução por motivo</div><div class="section-caption">Horas corridas e mesma amostra do indicador histórico. A mediana aparece ao passar o mouse.</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading"><div class="section-title">Tempo médio de resolução por motivo</div><div class="section-caption">Resultado principal em horas corridas. A mediana aparece ao passar o mouse.</div></div>', unsafe_allow_html=True)
 resolution_reason = (
     resolution_solved.groupby("Motivo do Contato [list]", as_index=False)
     .agg(
         **{
-            "Tempo médio (h)": ("Resolution spreadsheet hours", "mean"),
-            "Mediana (h)": ("Resolution spreadsheet hours", "median"),
+            "Tempo médio (h)": ("Resolution calendar hours", "mean"),
+            "Mediana (h)": ("Resolution calendar hours", "median"),
             "Tickets": ("Id", "count"),
         }
     )
@@ -898,7 +858,7 @@ resolution_reason_figure.update_traces(texttemplate="%{text:.1f} h", textpositio
 resolution_reason_figure.update_layout(height=430, margin=dict(l=10, r=65, t=10, b=35), xaxis_title="Horas corridas", yaxis_title="", coloraxis_showscale=False, paper_bgcolor="white", plot_bgcolor="white")
 st.plotly_chart(finish_figure(resolution_reason_figure), width="stretch", theme=None, config={"displayModeBar": False})
 
-st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume e tempos médios pela metodologia histórica, além do CSAT de cada responsável.</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading"><div class="section-title">Visão por agente</div><div class="section-caption">Volume, tempos médios e CSAT de cada responsável.</div></div>', unsafe_allow_html=True)
 agent_rows = []
 for agent_name, agent_data in solved.groupby("Assignee"):
     agent_resolution = resolution_scope(agent_data)
@@ -912,8 +872,8 @@ for agent_name, agent_data in solved.groupby("Assignee"):
     agent_rows.append({
         "Agente": agent_name,
         "Tickets resolvidos": len(agent_resolution),
-        "Resposta média (h)": agent_response["Response spreadsheet hours"].mean(),
-        "Resolução média (h)": agent_resolution["Resolution spreadsheet hours"].mean(),
+        "Resposta média (h)": agent_response["Response business hours"].mean(),
+        "Resolução média (h)": agent_resolution["Resolution calendar hours"].mean(),
         "Avaliações": agent_rated,
         "CSAT": agent_good / agent_rated if agent_rated else float("nan"),
     })
@@ -932,8 +892,8 @@ for _, agent in agent_summary.iterrows():
         '<div class="agent-volume-label">resolvidos</div>'
         '</div></div>'
         '<div class="agent-stats">'
-        f'<div class="agent-stat"><strong>{format_decimal(agent["Resposta média (h)"])} h</strong><span>Resposta média</span></div>'
-        f'<div class="agent-stat"><strong>{format_decimal(agent["Resolução média (h)"])} h</strong><span>Resolução média</span></div>'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resposta média (h)"])} h</strong><span>Resposta média · úteis</span></div>'
+        f'<div class="agent-stat"><strong>{format_decimal(agent["Resolução média (h)"])} h</strong><span>Resolução média · corridas</span></div>'
         f'<div class="agent-stat {csat_class}"><strong>{csat_text}</strong><span>CSAT · {format_number(agent["Avaliações"])} avaliações</span></div>'
         '</div></div>'
     )
