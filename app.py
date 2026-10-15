@@ -35,35 +35,22 @@ META_TEMPO_RESPOSTA_H = 28.0
 META_TEMPO_RESOLUCAO_H = 55.0
  
 # Reclame Aqui
-
 RA_NOTA = 9.0 
-
 RA_NOTA_MES_ANTERIOR = 8.9
-
 RA_RECLAMACOES = 20
-
 RA_RECLAMACOES_MES_ANTERIOR = 9
-
 RA_RESPONDIDAS_PCT = 98.9
-
 RA_VOLTARIAM_PCT = 84.3
-
 RA_INDICE_SOLUCAO_PCT = 92.2
-
 RA_NOTA_CONSUMIDOR = 8.59
-
 RA_TEMPO_MEDIO_RESPOSTA = "7 dias e 7 horas"
 
 # Categorias das reclamações no Reclame Aqui.
 
 RA_CATEGORIAS_RECLAMACOES = {
-
     "Problemas de qualidade": 9,
-
     "Questões logísticas": 10,
-
     "Experiência de compra e atendimento": 1,
-
 }
 
 # Categorias das avaliações no Reclame Aqui. Preencha as quantidades manualmente.
@@ -71,13 +58,9 @@ RA_CATEGORIAS_RECLAMACOES = {
 # Se todas estiverem zeradas, o dashboard mostrará um aviso no lugar do gráfico.
 
 RA_CATEGORIAS_AVALIACOES = {
-
     "Positivas": 6,
-
     "Neutras": 0,
-
     "Negativas": 0,
-
 }
  
 # Categorias das avaliações no Reclame Aqui. Preencha as quantidades manualmente.
@@ -85,13 +68,9 @@ RA_CATEGORIAS_AVALIACOES = {
 # Se todas estiverem zeradas, o dashboard mostrará um aviso no lugar do gráfico.
 
 RA_CATEGORIAS_AVALIACOES = {
-
     "Positivas": 6,
-
     "Neutras": 0,
-
     "Negativas": 0,
-
 }
  
 
