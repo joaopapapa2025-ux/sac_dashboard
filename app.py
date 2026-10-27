@@ -925,7 +925,7 @@ if period_mode == "Período personalizado":
     ].copy()
 
 if history_periods:
-    st.markdown('<div class="section-heading"><div class="section-title">Tempos de resposta e resolução — mês vs mês</div><div class="section-caption">Resposta em horas úteis; resolução em horas corridas. (O) é objetivo, (R) é realizado e os valores são médias.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-heading"><div class="section-title">Tempos de resposta e resolução - mês vs mês</div><div class="section-caption">Resposta em horas úteis; resolução em horas corridas. (O) é objetivo, (R) é realizado e os valores são médias.</div></div>', unsafe_allow_html=True)
     st.markdown(monthly_table(history_source, history_periods), unsafe_allow_html=True)
 
 st.markdown(
